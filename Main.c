@@ -262,14 +262,13 @@ HRESULT ScanMemoryForInterestingData(
     ULONG DisplayMemCommandsCount
 )
 {
-    HRESULT Hr = S_OK;
     BOOL EndScan = FALSE;
 
     for (size_t c = 0; c < DisplayMemCommandsCount; c++)
     {
         ULONG Offset = 0;
 
-        if (EndScan == TRUE)
+        if (EndScan != FALSE)
         {
             break;
         }
@@ -284,20 +283,27 @@ HRESULT ScanMemoryForInterestingData(
 
             if (gPrevOutputCallback)
             {
-                if ((Hr = Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)gPrevOutputCallback)) != S_OK)
+                HRESULT tempHr = Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)gPrevOutputCallback);
+                if (tempHr != S_OK)
                 {
                     Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Failed to restore original callback!\n\n");
+                    return tempHr;
                 }
             }
 
-            if (wcsstr(gOutputBuffer, L"???") == 0 && (wcslen(gOutputBuffer) > 0))
+            if (wcsstr(gOutputBuffer, L"???") == 0 && (gOutputBuffer[0] != '\0'))
             {
                 Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"%s = %s", gCommandBuffer, gOutputBuffer);
             }
 
             memset(gOutputBuffer, 0, sizeof(gOutputBuffer));
 
-            Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)&gOutputCallback);
+            HRESULT tempHr = Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)&gOutputCallback);
+            if (tempHr != S_OK)
+            {
+                Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Failed to set output callback!\n\n");
+                return tempHr;
+            }
 
             Offset += 2;
 
@@ -314,7 +320,7 @@ HRESULT ScanMemoryForInterestingData(
             }
         }
     }
-    return Hr;
+    return S_OK;
 }
 
 void ReleaseInterfaces(
@@ -322,22 +328,34 @@ void ReleaseInterfaces(
     IDebugOutputCallbacks2* PrevOutputCallback
 )
 {
-    HRESULT Hr = S_OK;
+    // Ensure Context and its Client pointer are valid before proceeding
+    if (!Context || !Context->Client) {
+        return;
+    }
+
+    // Attempt to restore original output callbacks if they exist
     if (PrevOutputCallback)
     {
-        if ((Hr = Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)PrevOutputCallback)) != S_OK)
+        HRESULT hrRestore = Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)PrevOutputCallback);
+        if (hrRestore != S_OK)
         {
-            Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Failed to restore original callback!\n\n");
+            // Only output if DebugControl is valid
+            if (Context->DebugControl && Context->DebugControl->lpVtbl) {
+                Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Failed to restore original callback!\n\n");
+            }
         }
     }
 
-    if (Context->Symbols)
+    // Release Symbols interface if it was successfully acquired
+    if (Context->Symbols && Context->Symbols->lpVtbl)
     {
         Context->Symbols->lpVtbl->Release(Context->Symbols);
     }
 
-    if (Context->DebugControl)
+    // Release DebugControl interface if it was successfully acquired
+    if (Context->DebugControl && Context->DebugControl->lpVtbl)
     {
-        Context->DebugControl->lpVtbl->Release(Context->DebugControl);		
+        Context->DebugControl->lpVtbl->Release(Context->DebugControl);
     }
+    // Context->Client should NOT be released by the extension, as it's passed from the debugger engine.
 }
