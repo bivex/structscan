@@ -190,6 +190,16 @@ HRESULT InitAndValidateArgs(
         return E_INVALIDARG;
     }
 
+    // Extract module name from WideArgs
+    for (size_t c = 0; c < _countof(Context->ModuleName); c++)
+    {
+        if (Context->WideArgs[c] == L'!')
+        {
+            break;
+        }
+        Context->ModuleName[c] = Context->WideArgs[c];
+    }
+
     return Hr;
 }
 
