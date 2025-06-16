@@ -13,6 +13,19 @@
 // between the two callbacks is probably wrong. There must be a better way. I feel like I'm
 // supposed to be supplying an array of callbacks that will be called in series, but I don't know...
 
+// Define a structure to hold common scanning context
+typedef struct _SCAN_CONTEXT {
+    IDebugClient4* Client;
+    IDebugControl4* DebugControl;
+    IDebugSymbols4* Symbols;
+    wchar_t WideArgs[128];
+    wchar_t ModuleName[64];
+    ULONG ImageIndex;
+    ULONG64 ImageBase;
+    ULONG64 SymbolAddress;
+    DEBUG_MODULE_PARAMETERS ModuleParameters;
+} SCAN_CONTEXT, *PSCAN_CONTEXT;
+
 // Global variables defined in Main.c
 extern wchar_t gOutputBuffer[4096];
 extern wchar_t gCommandBuffer[128];
@@ -25,27 +38,12 @@ __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(PULONG Version, 
 __declspec(dllexport) HRESULT CALLBACK structscan(IDebugClient4* Client, PCSTR Args);
 
 HRESULT InitAndValidateArgs(
-    IDebugClient4* Client,
-    PCSTR Args,
-    wchar_t* WideArgs,
-    ULONG WideArgsSize,
-    IDebugControl4** DebugControl,
-    IDebugSymbols4** Symbols,
-    wchar_t* ModuleName,
-    ULONG ModuleNameSize
+    PSCAN_CONTEXT Context,
+    PCSTR Args
 );
 
 HRESULT GetSymbolInformation(
-    IDebugSymbols4* Symbols,
-    IDebugControl4* DebugControl,
-    wchar_t* ModuleName,
-    ULONG ModuleNameSize,
-    wchar_t* WideArgs,
-    ULONG WideArgsSize,
-    PULONG ImageIndex,
-    PULONG64 ImageBase,
-    PULONG64 SymbolAddress,
-    DEBUG_MODULE_PARAMETERS* ModuleParameters
+    PSCAN_CONTEXT Context
 );
 
 HRESULT SetupAndRestoreOutputCallbacks(
@@ -55,19 +53,13 @@ HRESULT SetupAndRestoreOutputCallbacks(
 );
 
 HRESULT ScanMemoryForInterestingData(
-    IDebugControl4* DebugControl,
-    IDebugSymbols4* Symbols,
-    IDebugClient4* Client,
-    wchar_t* WideArgs,
-    ULONG64 SymbolAddress,
+    PSCAN_CONTEXT Context,
     wchar_t** DisplayMemCommands,
     ULONG DisplayMemCommandsCount
 );
 
 void ReleaseInterfaces(
-    IDebugSymbols4* Symbols,
-    IDebugControl4* DebugControl,
-    IDebugClient4* Client,
+    PSCAN_CONTEXT Context,
     IDebugOutputCallbacks2* PrevOutputCallback
 );
 

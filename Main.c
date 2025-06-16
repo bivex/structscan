@@ -55,55 +55,38 @@ __declspec(dllexport) HRESULT CALLBACK structscan(IDebugClient4* Client, PCSTR A
 {
 	HRESULT Hr = S_OK;
 
-	IDebugControl4* DebugControl = NULL;
-
-	IDebugSymbols4* Symbols = NULL;	
-
-	wchar_t WideArgs[128] = { 0 };
-
-	wchar_t ModuleName[64] = { 0 };
-
-	ULONG ImageIndex = 0;
-
-	ULONG64 ImageBase = 0;
-
-	ULONG64 SearchHandle = 0;
-
-	ULONG64 SymbolAddress = 0;
-
-	DEBUG_MODULE_PARAMETERS ModuleParameters = { 0 };
+	SCAN_CONTEXT Context = { 0 };
+    Context.Client = Client;
 
 	wchar_t* DisplayMemCommands[] = { L"dS", L"ds" };
 
-	ULONG Offset = 0;
-
 	BOOL EndScan = FALSE;
 
-	if ((Hr = InitAndValidateArgs(Client, Args, WideArgs, _countof(WideArgs), &DebugControl, &Symbols, ModuleName, _countof(ModuleName))) != S_OK)
+	if ((Hr = InitAndValidateArgs(&Context, Args)) != S_OK)
 	{
 		goto Exit;
 	}
 
-	if ((Hr = GetSymbolInformation(Symbols, DebugControl, ModuleName, _countof(ModuleName), WideArgs, _countof(WideArgs), &ImageIndex, &ImageBase, &SymbolAddress, &ModuleParameters)) != S_OK)
+	if ((Hr = GetSymbolInformation(&Context)) != S_OK)
 	{
 		goto Exit;
 	}
 
-	DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Press Ctrl+C to abort...\n");
+	Context.DebugControl->lpVtbl->OutputWide(Context.DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Press Ctrl+C to abort...\n");
 
-	if ((Hr = SetupAndRestoreOutputCallbacks(Client, DebugControl, &gPrevOutputCallback)) != S_OK)
+	if ((Hr = SetupAndRestoreOutputCallbacks(Context.Client, Context.DebugControl, &gPrevOutputCallback)) != S_OK)
 	{
 		goto Exit;
 	}
 
-	if ((Hr = ScanMemoryForInterestingData(DebugControl, Symbols, Client, WideArgs, SymbolAddress, DisplayMemCommands, _countof(DisplayMemCommands))) != S_OK)
+	if ((Hr = ScanMemoryForInterestingData(&Context, DisplayMemCommands, _countof(DisplayMemCommands))) != S_OK)
 	{
 		goto Exit;
 	}
 
 Exit:
 
-	ReleaseInterfaces(Symbols, DebugControl, Client, gPrevOutputCallback);
+	ReleaseInterfaces(&Context, gPrevOutputCallback);
 
 	return(Hr);
 }
@@ -175,103 +158,79 @@ HRESULT __stdcall CbOutput2(IDebugOutputCallbacks2* This, ULONG Which, ULONG Fla
 }
 
 HRESULT InitAndValidateArgs(
-    IDebugClient4* Client,
-    PCSTR Args,
-    wchar_t* WideArgs,
-    ULONG WideArgsSize,
-    IDebugControl4** DebugControl,
-    IDebugSymbols4** Symbols,
-    wchar_t* ModuleName,
-    ULONG ModuleNameSize)
+    SCAN_CONTEXT* Context,
+    PCSTR Args)
 {
     HRESULT Hr = S_OK;
 
     size_t CharsConverted = 0;
 
-    mbstowcs_s(&CharsConverted, WideArgs, WideArgsSize, Args, _TRUNCATE);
+    mbstowcs_s(&CharsConverted, Context->WideArgs, _countof(Context->WideArgs), Args, _TRUNCATE);
 
-    if ((Hr = Client->lpVtbl->QueryInterface(Client, &IID_IDebugControl4, (void**)DebugControl)) != S_OK)
+    if ((Hr = Context->Client->lpVtbl->QueryInterface(Context->Client, &IID_IDebugControl4, (void**)&Context->DebugControl)) != S_OK)
     {
         return Hr;
     }
 
-    if ((Hr = Client->lpVtbl->QueryInterface(Client, &IID_IDebugSymbols4, (void**)Symbols)) != S_OK)
+    if ((Hr = Context->Client->lpVtbl->QueryInterface(Context->Client, &IID_IDebugSymbols4, (void**)&Context->Symbols)) != S_OK)
     {
-        (*DebugControl)->lpVtbl->OutputWide(*DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"QueryInterface failed! Hr = 0x%x!\n\n", Hr);
+        Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"QueryInterface failed! Hr = 0x%x!\n\n", Hr);
         return Hr;
     }
 
-    if (wcslen(WideArgs) >= 64 ||
-        wcschr(WideArgs, L'!') == NULL ||
-        WideArgs[0] == L'!' ||
-        wcschr(WideArgs, L' ') ||
-        wcschr(WideArgs, L'*'))
+    if (wcslen(Context->WideArgs) >= 64 ||
+        wcschr(Context->WideArgs, L'!') == NULL ||
+        Context->WideArgs[0] == L'!' ||
+        wcschr(Context->WideArgs, L' ') ||
+        wcschr(Context->WideArgs, L'*'))
     {
-        (*DebugControl)->lpVtbl->OutputWide(*DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"structscan v%d.%d, Joseph Ryan Ries 2022\n\n", EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
-        (*DebugControl)->lpVtbl->OutputWide(*DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Scans data structures for which you do not have private symbols, looking for interesting data.\n\n");
-        (*DebugControl)->lpVtbl->OutputWide(*DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"USAGE: !structscan module!struct\n\n");
+        Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"structscan v%d.%d, Joseph Ryan Ries 2022\n\n", EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
+        Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Scans data structures for which you do not have private symbols, looking for interesting data.\n\n");
+        Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"USAGE: !structscan module!struct\n\n");
         return E_INVALIDARG;
     }
 
-    for (size_t c = 0; c < ModuleNameSize; c++)
-    {
-        if (WideArgs[c] == L'!')
-        {
-            break;
-        }
-        ModuleName[c] = WideArgs[c];
-    }
     return Hr;
 }
 
 HRESULT GetSymbolInformation(
-    IDebugSymbols4* Symbols,
-    IDebugControl4* DebugControl,
-    wchar_t* ModuleName,
-    ULONG ModuleNameSize,
-    wchar_t* WideArgs,
-    ULONG WideArgsSize,
-    PULONG ImageIndex,
-    PULONG64 ImageBase,
-    PULONG64 SymbolAddress,
-    DEBUG_MODULE_PARAMETERS* ModuleParameters
-)
+    SCAN_CONTEXT* Context)
 {
     HRESULT Hr = S_OK;
 
-    if ((Hr = Symbols->lpVtbl->GetModuleByModuleNameWide(Symbols, ModuleName, 0, ImageIndex, ImageBase)) != S_OK)
+    if ((Hr = Context->Symbols->lpVtbl->GetModuleByModuleNameWide(Context->Symbols, Context->ModuleName, 0, &Context->ImageIndex, &Context->ImageBase)) != S_OK)
     {
-        DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"GetModuleByModuleNameWide failed! Hr = 0x%x!\n\n", Hr);
+        Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"GetModuleByModuleNameWide failed! Hr = 0x%x!\n\n", Hr);
         return Hr;
     }
 
-    if ((Hr = Symbols->lpVtbl->GetModuleParameters(Symbols, 1, NULL, *ImageIndex, ModuleParameters)) != S_OK)
+    if ((Hr = Context->Symbols->lpVtbl->GetModuleParameters(Context->Symbols, 1, NULL, Context->ImageIndex, &Context->ModuleParameters)) != S_OK)
     {
-        DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"GetModuleParameters failed! Hr = 0x%x!\n\n", Hr);
+        Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"GetModuleParameters failed! Hr = 0x%x!\n\n", Hr);
         return Hr;
     }
 
-    DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Module name: %s\nImage base: 0x%p\nMemory Size: %llu\n", ModuleName, *ImageBase, ModuleParameters->Size);
+    Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Module name: %s\nImage base: 0x%p\nMemory Size: %llu\n", Context->ModuleName, Context->ImageBase, Context->ModuleParameters.Size);
 
     ULONG64 SearchHandle = 0;
 
-    if ((Hr = Symbols->lpVtbl->StartSymbolMatchWide(Symbols, WideArgs, &SearchHandle)) != S_OK)
+    if ((Hr = Context->Symbols->lpVtbl->StartSymbolMatchWide(Context->Symbols, Context->WideArgs, &SearchHandle)) != S_OK)
     {
-        DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"StartSymbolMatchWide failed! Hr = 0x%x!\n\n", Hr);
+        Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"StartSymbolMatchWide failed! Hr = 0x%x!\n\n", Hr);
         return Hr;
     }
 
-    Symbols->lpVtbl->GetNextSymbolMatch(Symbols, SearchHandle, NULL, 0, 0, SymbolAddress);
+    Context->Symbols->lpVtbl->GetNextSymbolMatch(Context->Symbols, SearchHandle, NULL, 0, 0, &Context->SymbolAddress);
 
-    Symbols->lpVtbl->EndSymbolMatch(Symbols, SearchHandle);
+    Context->Symbols->lpVtbl->EndSymbolMatch(Context->Symbols, SearchHandle);
 
-    if (*SymbolAddress == 0)
+    if (Context->SymbolAddress == 0)
     {
-        DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Symbol %s was not found!\n\n", WideArgs);
+        Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Symbol %s was not found!\n\n", Context->WideArgs);
         return E_FAIL;
     }
 
-    DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Symbol Address: %p\n", *SymbolAddress);
+    Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Symbol Address: %p\n", Context->SymbolAddress);
 
     return Hr;
 }
@@ -298,22 +257,17 @@ HRESULT SetupAndRestoreOutputCallbacks(
 }
 
 HRESULT ScanMemoryForInterestingData(
-    IDebugControl4* DebugControl,
-    IDebugSymbols4* Symbols,
-    IDebugClient4* Client,
-    wchar_t* WideArgs,
-    ULONG64 SymbolAddress,
+    SCAN_CONTEXT* Context,
     wchar_t** DisplayMemCommands,
     ULONG DisplayMemCommandsCount
 )
 {
     HRESULT Hr = S_OK;
-    ULONG Offset = 0;
     BOOL EndScan = FALSE;
 
     for (size_t c = 0; c < DisplayMemCommandsCount; c++)
     {
-        Offset = 0;
+        ULONG Offset = 0;
 
         if (EndScan == TRUE)
         {
@@ -324,32 +278,32 @@ HRESULT ScanMemoryForInterestingData(
         {
             wchar_t SymbolName[64] = { 0 };
 
-            _snwprintf_s(gCommandBuffer, _countof(gCommandBuffer), _TRUNCATE, L"%s %s+0x%lx", DisplayMemCommands[c], WideArgs, Offset);
+            _snwprintf_s(gCommandBuffer, _countof(gCommandBuffer), _TRUNCATE, L"%s %s+0x%lx", DisplayMemCommands[c], Context->WideArgs, Offset);
 
-            DebugControl->lpVtbl->ExecuteWide(DebugControl, DEBUG_OUTCTL_THIS_CLIENT, gCommandBuffer, DEBUG_EXECUTE_DEFAULT);
+            Context->DebugControl->lpVtbl->ExecuteWide(Context->DebugControl, DEBUG_OUTCTL_THIS_CLIENT, gCommandBuffer, DEBUG_EXECUTE_DEFAULT);
 
             if (gPrevOutputCallback)
             {
-                if ((Hr = Client->lpVtbl->SetOutputCallbacks(Client, (PDEBUG_OUTPUT_CALLBACKS)gPrevOutputCallback)) != S_OK)
+                if ((Hr = Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)gPrevOutputCallback)) != S_OK)
                 {
-                    DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Failed to restore original callback!\n\n");
+                    Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Failed to restore original callback!\n\n");
                 }
             }
 
             if (wcsstr(gOutputBuffer, L"???") == 0 && (wcslen(gOutputBuffer) > 0))
             {
-                DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"%s = %s", gCommandBuffer, gOutputBuffer);
+                Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"%s = %s", gCommandBuffer, gOutputBuffer);
             }
 
             memset(gOutputBuffer, 0, sizeof(gOutputBuffer));
 
-            Client->lpVtbl->SetOutputCallbacks(Client, (PDEBUG_OUTPUT_CALLBACKS)&gOutputCallback);
+            Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)&gOutputCallback);
 
             Offset += 2;
 
-            Symbols->lpVtbl->GetNameByOffsetWide(Symbols, (SymbolAddress + Offset), SymbolName, _countof(SymbolName), NULL, NULL);
+            Context->Symbols->lpVtbl->GetNameByOffsetWide(Context->Symbols, (Context->SymbolAddress + Offset), SymbolName, _countof(SymbolName), NULL, NULL);
 
-            if (wcscmp(SymbolName, WideArgs) != 0)
+            if (wcscmp(SymbolName, Context->WideArgs) != 0)
             {
                 break;
             }
@@ -364,28 +318,26 @@ HRESULT ScanMemoryForInterestingData(
 }
 
 void ReleaseInterfaces(
-    IDebugSymbols4* Symbols,
-    IDebugControl4* DebugControl,
-    IDebugClient4* Client,
+    SCAN_CONTEXT* Context,
     IDebugOutputCallbacks2* PrevOutputCallback
 )
 {
     HRESULT Hr = S_OK;
     if (PrevOutputCallback)
     {
-        if ((Hr = Client->lpVtbl->SetOutputCallbacks(Client, (PDEBUG_OUTPUT_CALLBACKS)PrevOutputCallback)) != S_OK)
+        if ((Hr = Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)PrevOutputCallback)) != S_OK)
         {
-            DebugControl->lpVtbl->OutputWide(DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Failed to restore original callback!\n\n");
+            Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Failed to restore original callback!\n\n");
         }
     }
 
-    if (Symbols)
+    if (Context->Symbols)
     {
-        Symbols->lpVtbl->Release(Symbols);
+        Context->Symbols->lpVtbl->Release(Context->Symbols);
     }
 
-    if (DebugControl)
+    if (Context->DebugControl)
     {
-        DebugControl->lpVtbl->Release(DebugControl);		
+        Context->DebugControl->lpVtbl->Release(Context->DebugControl);		
     }
 }
