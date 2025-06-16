@@ -1,25 +1,80 @@
 #pragma once
 
-// This is the entry point of our DLL. EngHost calls this as soon as you load the DLL.
-__declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags);
+#include <DbgEng.h> // Required for HRESULT, IDebugClient4, etc.
 
-__declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient4* Client, _In_opt_ PCSTR Args);
+// structscan - a WinDbg extension that scans data structures for which you do not have 
+// private symbols and attempts to find interesting data in them.
+// Joseph Ryan Ries - 2022. Watch the development on this extension on video
+// here: https://www.youtube.com/watch/v=d1uT8tmnhZI
+//
+// TODO: Currently the only way I have gotten this to work is if I install my callback to
+// get debugger output, execute the debugger command, then reinstall the original callback
+// to write text to the debugger window. I feel like this constant flipping back and forth
+// between the two callbacks is probably wrong. There must be a better way. I feel like I'm
+// supposed to be supplying an array of callbacks that will be called in series, but I don't know...
 
+// Global variables defined in Main.c
+extern wchar_t gOutputBuffer[4096];
+extern wchar_t gCommandBuffer[128];
+extern IDebugOutputCallbacks2* gPrevOutputCallback;
+extern IDebugOutputCallbacks2 gOutputCallback;
+extern IDebugOutputCallbacks2Vtbl gOcbVtbl;
 
-// All of these CbXXX functions are my implementations of the methods that you would
-// find on a IDebugCallbacks2 interface. I will put pointers to all of these functions
-// into a "lpVtbl" and set that onto my callback during the extension initialization routine.
-// All of these functions need to exist even if they don't do anything because the debug engine
-// will try to call them and enghost will crash if any function pointers are null.
+// Function prototypes
+__declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(PULONG Version, PULONG Flags);
+__declspec(dllexport) HRESULT CALLBACK structscan(IDebugClient4* Client, PCSTR Args);
 
+HRESULT InitAndValidateArgs(
+    IDebugClient4* Client,
+    PCSTR Args,
+    wchar_t* WideArgs,
+    ULONG WideArgsSize,
+    IDebugControl4** DebugControl,
+    IDebugSymbols4** Symbols,
+    wchar_t* ModuleName,
+    ULONG ModuleNameSize
+);
+
+HRESULT GetSymbolInformation(
+    IDebugSymbols4* Symbols,
+    IDebugControl4* DebugControl,
+    wchar_t* ModuleName,
+    ULONG ModuleNameSize,
+    wchar_t* WideArgs,
+    ULONG WideArgsSize,
+    PULONG ImageIndex,
+    PULONG64 ImageBase,
+    PULONG64 SymbolAddress,
+    DEBUG_MODULE_PARAMETERS* ModuleParameters
+);
+
+HRESULT SetupAndRestoreOutputCallbacks(
+    IDebugClient4* Client,
+    IDebugControl4* DebugControl,
+    IDebugOutputCallbacks2** PrevOutputCallback
+);
+
+HRESULT ScanMemoryForInterestingData(
+    IDebugControl4* DebugControl,
+    IDebugSymbols4* Symbols,
+    IDebugClient4* Client,
+    wchar_t* WideArgs,
+    ULONG64 SymbolAddress,
+    wchar_t** DisplayMemCommands,
+    ULONG DisplayMemCommandsCount
+);
+
+void ReleaseInterfaces(
+    IDebugSymbols4* Symbols,
+    IDebugControl4* DebugControl,
+    IDebugClient4* Client,
+    IDebugOutputCallbacks2* PrevOutputCallback
+);
+
+// Callbacks for the debugger engine.
 ULONG __cdecl CbAddRef(IDebugOutputCallbacks2* This);
-
-ULONG __cdecl CbQueryInterface(IDebugOutputCallbacks2* This, IN REFIID InterfaceId, OUT PVOID* Interface);
-
+ULONG __cdecl CbQueryInterface(IDebugOutputCallbacks2* This, REFIID InterfaceId, PVOID* Interface);
 ULONG __cdecl CbRelease(IDebugOutputCallbacks2* This);
-
-HRESULT __cdecl CbGetInterestMask(IDebugOutputCallbacks2* This, OUT PULONG Mask);
-
-HRESULT __stdcall CbOutput(IDebugOutputCallbacks2* This, IN ULONG Mask, IN PCSTR Text);
-
-HRESULT __stdcall CbOutput2(IDebugOutputCallbacks2* This, IN ULONG Which, IN ULONG Flags, IN ULONG64 Arg, PCWSTR Text);
+HRESULT __cdecl CbGetInterestMask(IDebugOutputCallbacks2* This, PULONG Mask);
+HRESULT __stdcall CbOutput(IDebugOutputCallbacks2* This, ULONG Mask, PCSTR Text);
+HRESULT __stdcall CbOutput2(IDebugOutputCallbacks2* This, ULONG Which, ULONG Flags, ULONG64 Arg, PCWSTR Text); 
