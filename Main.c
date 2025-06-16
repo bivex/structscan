@@ -273,24 +273,33 @@ HRESULT ScanMemoryForInterestingData(
 )
 {
     BOOL EndScan = FALSE;
+    ULONG MaxScanOffset = 0x200; // Scan up to 512 bytes for demonstration
 
     for (size_t c = 0; c < DisplayMemCommandsCount; c++)
     {
         ULONG Offset = 0;
 
+        // Skip to next command if scan ended previously
         if (EndScan != FALSE)
         {
             break;
         }
 
-        while (EndScan == FALSE)
+        while (EndScan == FALSE && Offset < MaxScanOffset) // Loop until EndScan or MaxScanOffset
         {
-            wchar_t SymbolName[64] = { 0 };
+            // wchar_t SymbolName[64] = { 0 }; // Not used for loop control anymore
 
             _snwprintf_s(gCommandBuffer, _countof(gCommandBuffer), _TRUNCATE, L"%s %s+0x%lx", DisplayMemCommands[c], Context->WideArgs, Offset);
 
+            // Log the command about to be executed
+            Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"Executing command: %s\n", gCommandBuffer);
+
+            // Clear buffer before execution to properly capture new output
+            memset(gOutputBuffer, 0, sizeof(gOutputBuffer));
+
             Context->DebugControl->lpVtbl->ExecuteWide(Context->DebugControl, DEBUG_OUTCTL_THIS_CLIENT, gCommandBuffer, DEBUG_EXECUTE_DEFAULT);
 
+            // Restore original callback temporarily to allow its output to be shown
             if (gPrevOutputCallback)
             {
                 HRESULT tempHr = Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)gPrevOutputCallback);
@@ -301,13 +310,13 @@ HRESULT ScanMemoryForInterestingData(
                 }
             }
 
-            if (wcsstr(gOutputBuffer, L"???") == 0 && (gOutputBuffer[0] != '\0'))
+            // Output the scanned data if buffer is not empty (contains something other than "???")
+            if (gOutputBuffer[0] != '\0' && wcsstr(gOutputBuffer, L"???") == NULL)
             {
                 Context->DebugControl->lpVtbl->OutputWide(Context->DebugControl, DEBUG_OUTCTL_ALL_CLIENTS, L"%s = %s", gCommandBuffer, gOutputBuffer);
             }
 
-            memset(gOutputBuffer, 0, sizeof(gOutputBuffer));
-
+            // Restore our callback for next iteration
             HRESULT tempHr = Context->Client->lpVtbl->SetOutputCallbacks(Context->Client, (PDEBUG_OUTPUT_CALLBACKS)&gOutputCallback);
             if (tempHr != S_OK)
             {
@@ -315,16 +324,14 @@ HRESULT ScanMemoryForInterestingData(
                 return tempHr;
             }
 
-            Offset += 2;
+            Offset += 16; // Increment by 16 bytes for next scan, adjust as needed
 
-            Context->Symbols->lpVtbl->GetNameByOffsetWide(Context->Symbols, (Context->SymbolAddress + Offset), SymbolName, _countof(SymbolName), NULL, NULL);
+            // Removed SymbolName check because it was breaking too early.
+            // Context->Symbols->lpVtbl->GetNameByOffsetWide(Context->Symbols, (Context->SymbolAddress + Offset), SymbolName, _countof(SymbolName), NULL, NULL);
+            // if (wcscmp(SymbolName, Context->WideArgs) != 0) { break; }
 
-            if (wcscmp(SymbolName, Context->WideArgs) != 0)
-            {
-                break;
-            }
-
-            if ((Offset >= 0x1000) || ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(0x43) & 0x8000)))
+            // Check for Ctrl+C to abort scan
+            if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(0x43) & 0x8000))
             {
                 EndScan = TRUE;
             }

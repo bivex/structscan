@@ -16,14 +16,14 @@ IF %ERRORLEVEL% NEQ 0 (
     goto :eof
 )
 
-REM Build the project in Release configuration
-cmake --build . --config Release
+REM Build the project in Debug configuration
+cmake --build . --config Debug
 IF %ERRORLEVEL% NEQ 0 (
     echo Build failed.
     popd
     goto :eof
 )
 
-echo MyCustomApp_Example built successfully to MyCustomApp_Example\build\Release\MyCustomApp.exe
+echo MyCustomApp_Example built successfully to MyCustomApp_Example\build\Debug\MyCustomApp.exe
 
 popd 
