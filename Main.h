@@ -18,17 +18,17 @@ typedef struct _SCAN_CONTEXT {
     IDebugClient4* Client;
     IDebugControl4* DebugControl;
     IDebugSymbols4* Symbols;
-    wchar_t WideArgs[128];
-    wchar_t ModuleName[64];
-    ULONG ImageIndex;
-    ULONG64 ImageBase;
-    ULONG64 SymbolAddress;
-    DEBUG_MODULE_PARAMETERS ModuleParameters;
+    ULONG64 ImageBase;            // 8-byte
+    ULONG64 SymbolAddress;        // 8-byte
+    ULONG ImageIndex;             // 4-byte (Moved here for alignment)
+    DEBUG_MODULE_PARAMETERS ModuleParameters; // Larger structure, typically aligned
+    wchar_t WideArgs[256];        // Array
+    wchar_t ModuleName[128];      // Array
 } SCAN_CONTEXT, *PSCAN_CONTEXT;
 
 // Global variables defined in Main.c
 extern wchar_t gOutputBuffer[4096];
-extern wchar_t gCommandBuffer[128];
+extern wchar_t gCommandBuffer[512]; // Corrected size
 extern IDebugOutputCallbacks2* gPrevOutputCallback;
 extern IDebugOutputCallbacks2 gOutputCallback;
 extern IDebugOutputCallbacks2Vtbl gOcbVtbl;
@@ -37,10 +37,9 @@ extern IDebugOutputCallbacks2Vtbl gOcbVtbl;
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(PULONG Version, PULONG Flags);
 __declspec(dllexport) HRESULT CALLBACK structscan(IDebugClient4* Client, PCSTR Args);
 
-HRESULT InitAndValidateArgs(
-    PSCAN_CONTEXT Context,
-    PCSTR Args
-);
+// New helper function prototypes
+HRESULT AcquireDebugInterfaces(SCAN_CONTEXT* Context, IDebugClient4* Client);
+HRESULT EnumerateAndScanAllSymbols(SCAN_CONTEXT* Context);
 
 HRESULT GetSymbolInformation(
     PSCAN_CONTEXT Context
@@ -65,7 +64,7 @@ void ReleaseInterfaces(
 
 // Callbacks for the debugger engine.
 ULONG __cdecl CbAddRef(IDebugOutputCallbacks2* This);
-ULONG __cdecl CbQueryInterface(IDebugOutputCallbacks2* This, REFIID InterfaceId, PVOID* Interface);
+HRESULT __cdecl CbQueryInterface(IDebugOutputCallbacks2* This, REFIID InterfaceId, PVOID* Interface); // Corrected return type
 ULONG __cdecl CbRelease(IDebugOutputCallbacks2* This);
 HRESULT __cdecl CbGetInterestMask(IDebugOutputCallbacks2* This, PULONG Mask);
 HRESULT __stdcall CbOutput(IDebugOutputCallbacks2* This, ULONG Mask, PCSTR Text);
