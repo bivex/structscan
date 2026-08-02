@@ -1,11 +1,12 @@
 /**
  * @file Main.cpp
- * @brief StructScan v3.0 — Intelligent Multi-Algorithm Structure Reconstruction Engine
+ * @brief StructScan v4.0 — Intelligent Structure Reconstruction & C/C++ Header Synthesizer
  * @author Joseph Ryan Ries (2022) / Modernized & AI-Enhanced by Antigravity AI (2026)
  *
  * Commands:
  *   !structscan <sym|addr> [size]          — single-instance smart scan
  *   !structscan list <sym|addr> [size]     — multi-instance LIST_ENTRY cross-reference
+ *   !structscan emit <sym|addr> [size]     — C/C++ struct header code generator
  *   !structscan entropy <sym|addr> [size]  — raw entropy heatmap only
  *   !structscan unload                     — safe unload hint
  */
@@ -14,7 +15,7 @@
 #include <cwchar>
 #include <cstdio>
 
-#define EXTENSION_VERSION_MAJOR 3
+#define EXTENSION_VERSION_MAJOR 4
 #define EXTENSION_VERSION_MINOR 0
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,7 +34,6 @@ __declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void) {}
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Resolve symbol or hex address → ULONG64
 static ULONG64 ResolveTarget(
     IDebugControl4*  ctrl,
     IDebugSymbols4*  sym,
@@ -43,12 +43,10 @@ static ULONG64 ResolveTarget(
     size_t           modNameCch = 0,
     ULONG*           outModSize = nullptr
 ) {
-    // Try direct hex parse
     wchar_t* end = nullptr;
     ULONG64 addr = wcstoull(token, &end, 16);
     if (end != token && *end == L'\0' && addr >= 0x10000) return addr;
 
-    // Symbol lookup
     wchar_t modName[128] = {};
     wchar_t* bang = const_cast<wchar_t*>(wcschr(token, L'!'));
     if (bang) {
@@ -74,7 +72,6 @@ static ULONG64 ResolveTarget(
     return result;
 }
 
-// Confidence bar  [####----]
 static std::wstring ConfBar(double conf, int width = 8) {
     std::wstring bar = L"[";
     int filled = static_cast<int>(conf * width + 0.5);
@@ -83,7 +80,6 @@ static std::wstring ConfBar(double conf, int width = 8) {
     return bar;
 }
 
-// Print single FieldAnalysis result line
 static void PrintField(IDebugControl4* ctrl, const FieldAnalysis& fa) {
     if (fa.type == FieldType::Unknown || fa.type == FieldType::Padding) return;
 
@@ -134,9 +130,8 @@ static HRESULT DoSingleScan(
         static_cast<unsigned long long>(addr),
         static_cast<unsigned long>(scanWindow));
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"[+] Algorithm: Bayesian Field Classifier v3.0 (Shannon Entropy + Multi-feature)\n\n");
+        L"[+] Algorithm: Bayesian Field Classifier v4.0 (Shannon Entropy + Multi-feature)\n\n");
 
-    // Print header
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"  Offset    Address               Type              Entropy  Confidence  Annotation\n");
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
@@ -194,8 +189,6 @@ static HRESULT DoListCrossRef(
         L"[+] LIST_ENTRY head: 0x%016llx\n",
         static_cast<unsigned long long>(headAddr));
 
-    // ── Phase 1: Discover LIST_ENTRY offsets inside first object ─────────────
-    // Read the first object and find LIST_ENTRY candidates
     std::vector<uint8_t> buf0(scanWindow);
     ULONG rd0 = 0;
     if (FAILED(ds->ReadVirtual(headAddr, buf0.data(), scanWindow, &rd0)) || rd0 < 16) {
@@ -207,7 +200,6 @@ static HRESULT DoListCrossRef(
     analyzer.DataSpaces = ds;
     analyzer.Symbols    = sym;
 
-    // Find all LIST_ENTRY offsets in first object
     struct ListEntryCandidate { ULONG offset; ULONG64 flink; ULONG64 blink; };
     std::vector<ListEntryCandidate> listCandidates;
 
@@ -230,7 +222,6 @@ static HRESULT DoListCrossRef(
         return E_FAIL;
     }
 
-    // Use the first valid LIST_ENTRY found (or try all)
     for (auto& le : listCandidates) {
         wchar_t symBuf[256] = {}; ULONG64 disp = 0;
         std::wstring leAnnot;
@@ -243,23 +234,20 @@ static HRESULT DoListCrossRef(
             leAnnot.empty() ? L"<no symbol>" : leAnnot.c_str());
     }
 
-    // ── Phase 2: Walk the list, collect struct base addresses ─────────────────
     auto& best = listCandidates[0];
-    ULONG64 leHead  = headAddr + best.offset;  // addr of LIST_ENTRY in head
+    ULONG64 leHead  = headAddr + best.offset;
     std::vector<ULONG64> instances = CrossRefEngine::WalkListEntry(ds, leHead, best.offset, 64);
 
     if (instances.empty()) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] List appears empty or head == self (empty list)\n");
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] List appears empty or head == self\n");
         return S_OK;
     }
-    // Include head object itself
     instances.insert(instances.begin(), headAddr);
 
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"[+] Collected %llu struct instances for cross-reference analysis\n\n",
         static_cast<unsigned long long>(instances.size()));
 
-    // ── Phase 3: Cross-reference analysis ─────────────────────────────────────
     auto profiles = CrossRefEngine::Analyze(ds, sym, instances, scanWindow);
 
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
@@ -271,12 +259,10 @@ static HRESULT DoListCrossRef(
     for (auto& prof : profiles) {
         if (!prof.isInteresting) continue;
 
-        // Count unique values across instances
         std::vector<uint64_t> sorted = prof.rawValues;
         std::sort(sorted.begin(), sorted.end());
         size_t uniqueVals = std::unique(sorted.begin(), sorted.end()) - sorted.begin();
 
-        // Sample annotation from first instance that has a pointer
         std::wstring annotation;
         for (size_t i = 0; i < prof.rawValues.size() && annotation.empty(); i++) {
             uint64_t v = prof.rawValues[i];
@@ -290,7 +276,6 @@ static HRESULT DoListCrossRef(
             }
         }
         if (annotation.empty() && prof.dominantType == FieldType::AsciiString) {
-            // Show distinct string values
             std::wstring vals;
             size_t shown = 0;
             for (size_t i = 0; i < instances.size() && shown < 3; i++) {
@@ -327,7 +312,148 @@ static HRESULT DoListCrossRef(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Mode 3: Entropy Heatmap
+// Mode 3: C/C++ Header Code Synthesizer (!structscan emit)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static HRESULT DoEmitHeader(
+    IDebugControl4*    ctrl,
+    IDebugSymbols4*    sym,
+    IDebugDataSpaces4* ds,
+    const wchar_t*     target,
+    ULONG              scanWindow
+) {
+    ULONG64 addr = ResolveTarget(ctrl, sym, target, nullptr, nullptr, 0, nullptr);
+    if (addr == 0) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Cannot resolve: %s\n", target);
+        return E_FAIL;
+    }
+
+    std::vector<uint8_t> buf(scanWindow);
+    ULONG rd = 0;
+    if (FAILED(ds->ReadVirtual(addr, buf.data(), scanWindow, &rd)) || rd == 0) return E_FAIL;
+
+    SmartFieldAnalyzer analyzer;
+    analyzer.DataSpaces = ds;
+    analyzer.Symbols    = sym;
+
+    std::vector<FieldAnalysis> fields;
+    for (ULONG off = 0; off + 8 <= rd; off += 8) {
+        auto fa = analyzer.Analyze(buf.data(), rd, off, addr);
+        if (fa.type != FieldType::Unknown && fa.type != FieldType::Padding && fa.confidence > 0.25) {
+            fields.push_back(fa);
+        }
+    }
+
+    std::wstring structName = L"RECONSTRUCTED_";
+    for (size_t i = 0; i < wcslen(target); i++) {
+        wchar_t c = target[i];
+        if (iswalnum(c)) structName += c;
+        else structName += L'_';
+    }
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"// Auto-generated by StructScan v4.0 (AI Structure Synthesizer)\n"
+        L"// Target: %s (0x%016llx) | Scan Window: 0x%lx bytes\n\n",
+        target, static_cast<unsigned long long>(addr), static_cast<unsigned long>(rd));
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"typedef struct _%s {\n", structName.c_str());
+
+    ULONG currentOffset = 0;
+
+    for (size_t i = 0; i < fields.size(); i++) {
+        const auto& fa = fields[i];
+
+        if (fa.offset > currentOffset) {
+            ULONG padLen = fa.offset - currentOffset;
+            wchar_t padLine[256] = {};
+            swprintf_s(padLine, L"    /* +0x%04lx */ uint8_t           Padding_%04lx[%lu];\n",
+                currentOffset, currentOffset, static_cast<unsigned long>(padLen));
+            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"%s", padLine);
+            currentOffset = fa.offset;
+        }
+
+        wchar_t fieldLine[512] = {};
+        const wchar_t* cType = L"uint64_t         ";
+        std::wstring fName;
+
+        switch (fa.type) {
+            case FieldType::Pointer:
+                cType = L"PVOID            ";
+                if (!fa.annotation.empty()) {
+                    std::wstring sName;
+                    const wchar_t* bang = wcschr(fa.annotation.c_str(), L'!');
+                    const wchar_t* symStart = bang ? (bang + 1) : fa.annotation.c_str();
+                    for (size_t k = 0; symStart[k] != L'\0'; k++) {
+                        wchar_t c = symStart[k];
+                        if (iswalnum(c) || c == L'_') sName += c;
+                        else break;
+                    }
+                    if (!sName.empty() && sName != L"string") fName = sName;
+                }
+                break;
+            case FieldType::ListEntry:
+                cType = L"LIST_ENTRY       ";
+                break;
+            case FieldType::UnicodeString:
+                cType = L"UNICODE_STRING   ";
+                break;
+            case FieldType::AsciiString:
+                cType = L"char             ";
+                break;
+            case FieldType::PoolTag:
+                cType = L"ULONG            ";
+                break;
+            case FieldType::Handle:
+                cType = L"HANDLE           ";
+                break;
+            case FieldType::Flags:
+                cType = L"uint64_t         ";
+                break;
+            case FieldType::Integer:
+                cType = L"uint64_t         ";
+                break;
+            default:
+                cType = L"uint64_t         ";
+                break;
+        }
+
+        if (fName.empty()) {
+            wchar_t fn[64] = {};
+            swprintf_s(fn, L"Field_%04lx", fa.offset);
+            fName = fn;
+        }
+
+        std::wstring comment;
+        if (!fa.annotation.empty()) {
+            comment = L" // " + fa.annotation;
+        }
+
+        swprintf_s(fieldLine, L"    /* +0x%04lx */ %s %-24s%s\n",
+            fa.offset, cType, fName.c_str(), comment.c_str());
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"%s", fieldLine);
+
+        ULONG size = 8;
+        if (fa.type == FieldType::UnicodeString || fa.type == FieldType::ListEntry) size = 16;
+        currentOffset = fa.offset + size;
+    }
+
+    if (currentOffset < rd) {
+        ULONG padLen = rd - currentOffset;
+        wchar_t padLine[256] = {};
+        swprintf_s(padLine, L"    /* +0x%04lx */ uint8_t           Padding_%04lx[%lu];\n",
+            currentOffset, currentOffset, static_cast<unsigned long>(padLen));
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"%s", padLine);
+    }
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"} %s, *P%s;\n\n", structName.c_str(), structName.c_str());
+
+    return S_OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mode 4: Entropy Heatmap
 // ─────────────────────────────────────────────────────────────────────────────
 
 static HRESULT DoEntropyMap(
@@ -357,7 +483,6 @@ static HRESULT DoEntropyMap(
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"  --------  -------  -------------------------  ----------------\n");
 
-    // 16-byte windows for entropy heatmap
     for (ULONG off = 0; off + 16 <= rd; off += 16) {
         double H = SmartFieldAnalyzer::ComputeEntropy(buf.data() + off, 16);
         int barW = static_cast<int>(H / 8.0 * 24 + 0.5);
@@ -401,21 +526,18 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
     if (FAILED(Client->QueryInterface(__uuidof(IDebugSymbols4),    (void**)&sym)))  { ctrl->Release(); return E_FAIL; }
     if (FAILED(Client->QueryInterface(__uuidof(IDebugDataSpaces4), (void**)&ds)))   { sym->Release(); ctrl->Release(); return E_FAIL; }
 
-    // Parse args
     wchar_t wargs[512] = {};
     if (Args && *Args) {
         size_t c = 0;
         mbstowcs_s(&c, wargs, _countof(wargs), Args, _TRUNCATE);
     }
 
-    // Tokenize: mode, target, [size]
     wchar_t tok0[128] = {}, tok1[128] = {}, tok2[128] = {};
     int tokenCount = swscanf_s(wargs, L"%127s %127s %127s",
         tok0, (unsigned)_countof(tok0),
         tok1, (unsigned)_countof(tok1),
         tok2, (unsigned)_countof(tok2));
 
-    // ── help / empty ────────────────────────────────────────────────────────
     if (tokenCount <= 0 || wcslen(tok0) == 0) {
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"==============================================================\n");
@@ -428,23 +550,34 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
             L" USAGE:\n"
             L"   !structscan <sym|addr> [size]          - Bayesian single-instance scan\n"
             L"   !structscan list <sym|addr> [size]     - Multi-instance cross-reference\n"
+            L"   !structscan emit <sym|addr> [size]     - Synthesize C/C++ struct header\n"
             L"   !structscan entropy <sym|addr> [size]  - Shannon entropy heatmap\n"
             L"   !structscan unload                     - Unload hint\n\n"
             L" EXAMPLES:\n"
             L"   !structscan nt!PsInitialSystemProcess 0x400\n"
+            L"   !structscan emit nt!KdDebuggerDataBlock 0x400\n"
             L"   !structscan list nt!PsActiveProcessHead 0x800\n"
             L"   !structscan entropy fffff802ac809ab0 0x200\n\n");
         goto Exit;
     }
 
-    // ── unload ──────────────────────────────────────────────────────────────
     if (_wcsicmp(tok0, L"unload") == 0) {
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"[+] Run: .unload structscan\n");
         goto Exit;
     }
 
-    // ── entropy mode ────────────────────────────────────────────────────────
+    if (_wcsicmp(tok0, L"emit") == 0) {
+        if (wcslen(tok1) == 0) {
+            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan emit <sym|addr> [size]\n");
+            hr = E_INVALIDARG; goto Exit;
+        }
+        ULONG window = (wcslen(tok2) > 0) ? static_cast<ULONG>(wcstoul(tok2, nullptr, 16)) : 0x400;
+        if (!window) window = 0x400;
+        hr = DoEmitHeader(ctrl, sym, ds, tok1, window);
+        goto Exit;
+    }
+
     if (_wcsicmp(tok0, L"entropy") == 0) {
         if (wcslen(tok1) == 0) {
             ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan entropy <sym|addr> [size]\n");
@@ -456,7 +589,6 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
         goto Exit;
     }
 
-    // ── list (cross-reference) mode ─────────────────────────────────────────
     if (_wcsicmp(tok0, L"list") == 0) {
         if (wcslen(tok1) == 0) {
             ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan list <sym|addr> [size]\n");
@@ -468,7 +600,6 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
         goto Exit;
     }
 
-    // ── default: single scan ─────────────────────────────────────────────────
     {
         ULONG window = (wcslen(tok1) > 0) ? static_cast<ULONG>(wcstoul(tok1, nullptr, 16)) : 0x400;
         if (!window) window = 0x400;
