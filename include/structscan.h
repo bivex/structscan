@@ -1,13 +1,13 @@
 /**
  * @file structscan.h
- * @brief StructScan v3.0 — Intelligent Multi-Algorithm Structure Reconstruction Engine
+ * @brief StructScan v3.5 — Intelligent Multi-Algorithm Structure Reconstruction Engine
  * @author Joseph Ryan Ries (2022) / Modernized & AI-Enhanced by Antigravity AI (2026)
  *
  * Algorithms:
  *   1. Shannon Entropy field confidence scoring
  *   2. Bayesian multi-feature type classifier
  *   3. Multi-instance LIST_ENTRY cross-reference analysis
- *   4. Pool tag forensics (known NT object types)
+ *   4. Pool tag forensics (50+ known NT object types)
  */
 
 #ifndef STRUCTSCAN_H
@@ -39,6 +39,14 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
 #ifdef __cplusplus
 }
 #endif
+
+// Helper macro to construct Little-Endian 4-byte uint32_t Pool Tag
+constexpr uint32_t MAKE_TAG(char a, char b, char c, char d) {
+    return static_cast<uint32_t>(static_cast<uint8_t>(a))        |
+          (static_cast<uint32_t>(static_cast<uint8_t>(b)) << 8)  |
+          (static_cast<uint32_t>(static_cast<uint8_t>(c)) << 16) |
+          (static_cast<uint32_t>(static_cast<uint8_t>(d)) << 24);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Field Type Classification System
@@ -103,7 +111,7 @@ struct OffsetProfile {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Known NT Pool Tags
+// Known NT Pool Tags (55+ Kernel Object Pool Tags)
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct PoolTagInfo {
@@ -114,80 +122,80 @@ struct PoolTagInfo {
 
 static constexpr PoolTagInfo kKnownPoolTags[] = {
     // Executive Objects & Processes
-    { 'corP', "EPROCESS (Process)",         0xB80 },   // 'Proc'
-    { 'erhT', "ETHREAD (Thread)",           0x5C0 },   // 'Thre'
-    { 'eliF', "FILE_OBJECT (File)",         0x120 },   // 'File'
-    { 'virD', "DRIVER_OBJECT (Driver)",     0x150 },   // 'Driv'
-    { 'iveD', "DEVICE_OBJECT (Device)",     0x200 },   // 'Devi'
-    { ' ekoT', "TOKEN (Security Token)",    0x300 },   // 'Toke'
-    { ' troP', "ALPC_PORT (LPC/ALPC Port)", 0x180 },   // 'Port'
-    { '  boJ', "JOB (Job Object)",          0x280 },   // 'Job '
-    { '  tnE', "KEVENT (Kernel Event)",     0x18  },   // 'Entv' / 'Evnt'
-    { '  xM',  "KMUTANT (Mutex)",           0x38  },   // 'Mutx'
-    { '  meS', "KSEMAPHORE (Semaphore)",    0x20  },   // 'Sem '
-    { '  mTI', "KTIMER (Timer)",            0x40  },   // 'Timr'
-    { '  tceS', "SECTION (Memory Section)", 0x90  },   // 'Sect'
-    { '  bmyS', "OBJECT_SYMBOLIC_LINK",     0x48  },   // 'Symb'
-    { '  riD', "OBJECT_DIRECTORY (Folder)", 0x200 },   // 'Dir '
+    { MAKE_TAG('P','r','o','c'), "EPROCESS (Process)",         0xB80 },
+    { MAKE_TAG('T','h','r','e'), "ETHREAD (Thread)",           0x5C0 },
+    { MAKE_TAG('F','i','l','e'), "FILE_OBJECT (File)",         0x120 },
+    { MAKE_TAG('D','r','i','v'), "DRIVER_OBJECT (Driver)",     0x150 },
+    { MAKE_TAG('D','e','v','i'), "DEVICE_OBJECT (Device)",     0x200 },
+    { MAKE_TAG('T','o','k','e'), "TOKEN (Security Token)",    0x300 },
+    { MAKE_TAG('P','o','r','t'), "ALPC_PORT (LPC/ALPC Port)", 0x180 },
+    { MAKE_TAG('J','o','b',' '), "JOB (Job Object)",          0x280 },
+    { MAKE_TAG('E','v','n','t'), "KEVENT (Kernel Event)",     0x18  },
+    { MAKE_TAG('M','u','t','x'), "KMUTANT (Mutex)",           0x38  },
+    { MAKE_TAG('S','e','m',' '), "KSEMAPHORE (Semaphore)",    0x20  },
+    { MAKE_TAG('T','i','m','r'), "KTIMER (Timer)",            0x40  },
+    { MAKE_TAG('S','e','c','t'), "SECTION (Memory Section)", 0x90  },
+    { MAKE_TAG('S','y','m','b'), "OBJECT_SYMBOLIC_LINK",     0x48  },
+    { MAKE_TAG('D','i','r',' '), "OBJECT_DIRECTORY (Folder)", 0x200 },
 
     // Registry & I/O Subsystem
-    { ' yeK', "CMKEY_BODY (Registry Key)",  0x68  },   // 'Key '
-    { 'TnI ', "IRP (I/O Request Packet)",   0x118 },   // ' InT'
-    { '  oI', "IO_STATUS_BLOCK",            0x10  },   // 'Io  '
-    { ' sFN', "NTFS Control Block",         0x100 },   // 'NFs '
-    { ' ylF', "Filter Manager Data",        0x80  },   // 'Fly '
-    { ' tLF', "Filter Manager Callback",    0x40  },   // 'FLt '
+    { MAKE_TAG('K','e','y',' '), "CMKEY_BODY (Registry Key)",  0x68  },
+    { MAKE_TAG(' ','I','n','T'), "IRP (I/O Request Packet)",   0x118 },
+    { MAKE_TAG('I','o',' ',' '), "IO_STATUS_BLOCK",            0x10  },
+    { MAKE_TAG('N','F','s',' '), "NTFS Control Block",         0x100 },
+    { MAKE_TAG('F','L','t',' '), "Filter Manager Callback",    0x40  },
+    { MAKE_TAG('F','l','y',' '), "Filter Manager Data",        0x80  },
 
     // Memory Manager & Paging
-    { 'looP', "Pool Descriptor",            0     },   // 'Pool'
-    { 'mVtN', "NtVm Region",                0     },   // 'NtVm'
-    { 'paeH', "Heap Allocation",            0     },   // 'Heap'
-    { 'mLmM', "MDL (Memory Descriptor)",    0x30  },   // 'MmMl'
-    { 'kLmM', "Mm Locked Pages",            0     },   // 'MmLk'
-    { 'wVmM', "Mm View (MMVIEW)",           0     },   // 'MmVw'
-    { 'paWS', "Paging File / Swap",         0     },   // 'SWap'
-    { ' etP', "PTE (Page Table Entry)",     0x8   },   // 'Pte '
+    { MAKE_TAG('P','o','o','l'), "Pool Descriptor",            0     },
+    { MAKE_TAG('N','t','V','m'), "NtVm Region",                0     },
+    { MAKE_TAG('H','e','a','p'), "Heap Allocation",            0     },
+    { MAKE_TAG('M','m','M','l'), "MDL (Memory Descriptor)",    0x30  },
+    { MAKE_TAG('M','m','L','k'), "Mm Locked Pages",            0     },
+    { MAKE_TAG('M','m','V','w'), "Mm View (MMVIEW)",           0     },
+    { MAKE_TAG('S','W','a','p'), "Paging File / Swap",         0     },
+    { MAKE_TAG('P','t','e',' '), "PTE (Page Table Entry)",     0x8   },
 
     // Security & Access Control
-    { ' lcA', "ACL (Access Control List)",  0     },   // 'Acl '
-    { 'uceS', "SECURITY_DESCRIPTOR",        0     },   // 'Secu'
+    { MAKE_TAG('A','c','l',' '), "ACL (Access Control List)",  0     },
+    { MAKE_TAG('S','e','c','u'), "SECURITY_DESCRIPTOR",        0     },
 
     // Executive System & Threads
-    { 'mSyS', "System Memory Allocation",   0     },   // 'Sysm'
-    { ' xWk', "WORK_QUEUE_ITEM",            0x20  },   // 'kWx '
-    { ' SDC', "Code Integrity / CI",        0     },   // 'CDS '
-    { 'gDmA', "DMA Adapter",                0     },   // 'AmDg'
+    { MAKE_TAG('S','y','s','m'), "System Memory Allocation",   0     },
+    { MAKE_TAG('k','W','x',' '), "WORK_QUEUE_ITEM",            0x20  },
+    { MAKE_TAG('C','D','S',' '), "Code Integrity / CI",        0     },
+    { MAKE_TAG('A','m','D','g'), "DMA Adapter",                0     },
 
     // Networking (TCB, NDIS, NetBT)
-    { ' dND', "NDIS Driver Block",          0x200 },   // 'DNd '
-    { ' kTN', "NetBT Network Buffer",       0     },   // 'NTk '
-    { ' cTC', "TCP Connection Block (TCB)", 0x300 },   // 'CTc '
-    { ' pTU', "UDP Endpoint Block",         0x100 },   // 'UTp '
-    { ' sFI', "RDBSS / IFS Mini-Redirector",0     },   // 'IFs '
+    { MAKE_TAG('D','N','d',' '), "NDIS Driver Block",          0x200 },
+    { MAKE_TAG('N','T','k',' '), "NetBT Network Buffer",       0     },
+    { MAKE_TAG('C','T','c',' '), "TCP Connection Block (TCB)", 0x300 },
+    { MAKE_TAG('U','T','p',' '), "UDP Endpoint Block",         0x100 },
+    { MAKE_TAG('I','F','s',' '), "RDBSS / IFS Mini-Redirector",0     },
 
     // ETW & Telemetry
-    { 'teME', "ETW_GUID_ENTRY",             0x50  },   // 'EMet'
-    { ' tCE', "ETW Trace Session",          0x100 },   // 'ECt '
-    { ' pTE', "ETW Provider Object",        0x80  },   // 'ETp '
-    { ' rCE', "ETW Realtime Consumer",      0x80  },   // 'ECr '
+    { MAKE_TAG('E','M','e','t'), "ETW_GUID_ENTRY",             0x50  },
+    { MAKE_TAG('E','C','t',' '), "ETW Trace Session",          0x100 },
+    { MAKE_TAG('E','T','p',' '), "ETW Provider Object",        0x80  },
+    { MAKE_TAG('E','C','r',' '), "ETW Realtime Consumer",      0x80  },
 
     // WMI Diagnostics
-    { ' bKW', "WMI Buffer",                 0x1000},   // 'WKb '
-    { ' gKW', "WMI GUID Object",            0x60  },   // 'WKg '
-    { ' lCW', "WPP Trace Log",              0     },   // 'WCl '
+    { MAKE_TAG('W','K','b',' '), "WMI Buffer",                 0x1000},
+    { MAKE_TAG('W','K','g',' '), "WMI GUID Object",            0x60  },
+    { MAKE_TAG('W','C','l',' '), "WPP Trace Log",              0     },
 
     // Plug and Play (PnP) & Power Manager
-    { ' aKP', "PnP Auto-Play / Arrival",    0     },   // 'PKa '
-    { ' dKP', "DEVICE_NODE (PnP DevNode)",  0x1c0 },   // 'PKd '
-    { ' rKP', "PnP Relation List",          0     },   // 'PKr '
-    { ' dVP', "Power Manager State",        0     },   // 'PVd '
-    { ' iRP', "Power Request Object",       0x80  },   // 'PRi '
+    { MAKE_TAG('P','K','a',' '), "PnP Auto-Play / Arrival",    0     },
+    { MAKE_TAG('P','K','d',' '), "DEVICE_NODE (PnP DevNode)",  0x1c0 },
+    { MAKE_TAG('P','K','r',' '), "PnP Relation List",          0     },
+    { MAKE_TAG('P','V','d',' '), "Power Manager State",        0     },
+    { MAKE_TAG('P','R','i',' '), "Power Request Object",       0x80  },
 
     // Hyper-V & Virtualization
-    { ' hvW', "Hyper-V Hypervisor Call",    0     },   // 'Wvh '
-    { ' sVH', "Hyper-V Synthetic Device",   0     },   // 'HVs '
-    { ' mSH', "Hyper-V Shared Memory",      0     },   // 'HSm '
-    { ' rVH', "Hyper-V Root Partition",     0     },   // 'HVr '
+    { MAKE_TAG('W','v','h',' '), "Hyper-V Hypervisor Call",    0     },
+    { MAKE_TAG('H','V','s',' '), "Hyper-V Synthetic Device",   0     },
+    { MAKE_TAG('H','S','m',' '), "Hyper-V Shared Memory",      0     },
+    { MAKE_TAG('H','V','r',' '), "Hyper-V Root Partition",     0     },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -239,20 +247,6 @@ public:
     }
 
     // ── 3. Bayesian Field Classification ─────────────────────────────────────
-    //
-    // Features extracted per 8-byte field:
-    //   F1: isKernelPtr       (val > 0xFFFF000000000000)
-    //   F2: resolves to sym   (GetNameByOffsetWide succeeds)
-    //   F3: isValidUnicodeStr (valid UNICODE_STRING at offset)
-    //   F4: asciiRunLen >= 4  (inline ASCII string)
-    //   F5: isListEntry       (Flink->Blink == self)
-    //   F6: entropy < 1.0     (low entropy = padding/zero/small counter)
-    //   F7: entropy > 7.0     (high entropy = random/encrypted/ptr hash)
-    //   F8: isValidPoolTag    (4 printable ASCII bytes)
-    //   F9: sparsePopcount    (1-4 bits set = flags)
-    //   F10: val < 0x10000    (small integer: PID, TID, count)
-    //   F11: val & 3 == 0     (aligned = likely HANDLE, count, or ptr)
-
     FieldAnalysis Analyze(
         const uint8_t* buf, size_t bufSize,
         ULONG offset,
@@ -347,7 +341,6 @@ public:
                 std::vector<wchar_t> wstr(uLen / 2 + 1, 0);
                 ULONG uRead = 0;
                 if (SUCCEEDED(DataSpaces->ReadVirtual(uBuf, wstr.data(), uLen, &uRead)) && uRead > 0) {
-                    // Validate that buffer is actually printable wide chars
                     bool valid = true;
                     for (size_t i = 0; i < uLen / 2 && i < 64; i++) {
                         wchar_t wc = wstr[i];
@@ -374,8 +367,6 @@ public:
         }
 
         // ── Bayesian Type Decision ──────────────────────────────────────────
-        // Each type gets a log-odds score; highest wins.
-
         struct TypeScore { FieldType type; double score; };
         std::array<TypeScore, 9> scores = {{
             { FieldType::Padding,       0.0 },
@@ -391,51 +382,31 @@ public:
 
         auto& [t_Pad, t_List, t_Uni, t_Ptr, t_Asc, t_Tag, t_Hnd, t_Flg, t_Int] = scores;
 
-        // Padding signals
         if (f_allZero)          { t_Pad.score  += 4.0; t_Int.score  -= 2.0; t_Ptr.score -= 3.0; }
         if (f_lowEntropy)       { t_Pad.score  += 2.0; t_Asc.score  -= 1.0; }
-
-        // LIST_ENTRY
         if (f_isListEntry)      { t_List.score += 8.0; t_Ptr.score  -= 2.0; }
-
-        // UNICODE_STRING
         if (f_isUnicodeStr)     { t_Uni.score  += 8.0; t_Asc.score  -= 3.0; }
-
-        // Pointer
         if (f_kernelPtr)        { t_Ptr.score  += 4.0; t_Int.score  -= 3.0; t_Tag.score -= 3.0; }
         if (f_resolvesSym)      { t_Ptr.score  += 4.0; }
         if (f_highEntropy && f_kernelPtr) { t_Ptr.score += 1.0; }
-
-        // ASCII
         if (f_isAscii)          { t_Asc.score  += 3.0 + (asciiLen > 8 ? 2.0 : 0.0); }
         if (f_isAscii && !f_kernelPtr) { t_Asc.score += 2.0; }
-
-        // Pool Tag
         if (f_validPoolTag && !f_kernelPtr && !f_smallInt) { t_Tag.score += 4.0; }
-
-        // Handle (kernel handle: 0 or small multiple of 4, or 0xFFFFFFFF...)
         if (f_aligned && f_smallInt) { t_Hnd.score += 1.5; }
         if ((result.rawValue & 0xFFFFFFFF00000000ULL) == 0xFFFFFFFF00000000ULL) { t_Hnd.score += 2.0; }
-
-        // Flags (sparse bits in a non-pointer value)
         if (f_sparsePopcount && !f_kernelPtr && !f_smallInt) { t_Flg.score += 2.0; }
-
-        // Integer (PID, count, small value)
         if (f_smallInt)         { t_Int.score  += 3.0; t_Flg.score  -= 1.0; }
         if (!f_kernelPtr && !f_isAscii && !f_isUnicodeStr && !f_validPoolTag && !f_isListEntry)
                                 { t_Int.score  += 0.5; }
 
-        // Pick winner
         auto winner = std::max_element(scores.begin(), scores.end(),
             [](const TypeScore& a, const TypeScore& b) { return a.score < b.score; });
 
-        // Softmax confidence: winner_score / sum_of_positive_scores
         double posSum = 0.0;
         for (auto& s : scores) if (s.score > 0) posSum += s.score;
         result.type       = (winner->score > 0.0) ? winner->type : FieldType::Unknown;
         { double c = (posSum > 0) ? (winner->score / posSum) : 0.0; result.confidence = c < 1.0 ? c : 1.0; }
 
-        // Annotate non-pointer types if no annotation yet
         if (result.annotation.empty()) {
             wchar_t buf[128] = {};
             switch (result.type) {
@@ -489,11 +460,10 @@ public:
 
 class CrossRefEngine {
 public:
-    // Walk a LIST_ENTRY chain starting at head (Flink direction), collect up to maxInstances pointers
     static std::vector<ULONG64> WalkListEntry(
         IDebugDataSpaces4* ds,
         ULONG64 headAddr,
-        ULONG   listEntryOffsetInStruct,  // offset of LIST_ENTRY within struct
+        ULONG   listEntryOffsetInStruct,
         ULONG   maxInstances = 64
     ) {
         std::vector<ULONG64> results;
@@ -501,7 +471,6 @@ public:
 
         ULONG64 flink = 0;
         ULONG rd = 0;
-        // Read Flink of head
         if (FAILED(ds->ReadVirtual(headAddr, &flink, 8, &rd)) || rd != 8) return results;
 
         ULONG64 current = flink;
@@ -509,11 +478,9 @@ public:
                current > 0xFFFF000000000000ULL &&
                results.size() < maxInstances)
         {
-            // Struct base = list_entry_addr - listEntryOffset
             ULONG64 structBase = current - listEntryOffsetInStruct;
             results.push_back(structBase);
 
-            // Advance: read Flink of current LIST_ENTRY
             ULONG64 nextFlink = 0;
             if (FAILED(ds->ReadVirtual(current, &nextFlink, 8, &rd)) || rd != 8) break;
             current = nextFlink;
@@ -521,7 +488,6 @@ public:
         return results;
     }
 
-    // Cross-reference analysis across multiple struct instances
     static std::vector<OffsetProfile> Analyze(
         IDebugDataSpaces4*  ds,
         IDebugSymbols4*     sym,
@@ -530,7 +496,6 @@ public:
     ) {
         if (instances.empty() || !ds) return {};
 
-        // per-offset: collect per-instance field analyses
         std::map<ULONG, OffsetProfile> profiles;
 
         SmartFieldAnalyzer analyzer;
@@ -553,24 +518,17 @@ public:
             }
         }
 
-        // Compute dominant type + consistency per offset
         std::vector<OffsetProfile> result;
         for (auto& [off, prof] : profiles) {
-            // Count type frequencies
             std::unordered_map<int, int> freq;
             for (auto t : prof.observedTypes) freq[static_cast<int>(t)]++;
 
-            // Find dominant type
             auto domIt = std::max_element(freq.begin(), freq.end(),
                 [](auto& a, auto& b) { return a.second < b.second; });
 
             prof.dominantType    = static_cast<FieldType>(domIt->first);
             prof.typeConsistency = static_cast<double>(domIt->second) / static_cast<double>(prof.observedTypes.size());
 
-            // Field is interesting if:
-            //   - consistent type (> 70% instances agree)
-            //   - not padding or unknown
-            //   - at least 2 instances agree
             prof.isInteresting = (
                 prof.typeConsistency >= 0.6 &&
                 prof.dominantType != FieldType::Padding &&
