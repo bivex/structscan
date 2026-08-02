@@ -1,25 +1,114 @@
-#pragma once
+/**
+ * @file Main.h
+ * @brief StructScan WinDbg Extension — Advanced Non-Symbol Structure Scanner
+ * @author Modernized C++17 Architecture
+ * @date 2026-08-02
+ */
 
-// This is the entry point of our DLL. EngHost calls this as soon as you load the DLL.
+#ifndef STRUCTSCAN_MAIN_H
+#define STRUCTSCAN_MAIN_H
+
+#define INITGUID
+#include <windows.h>
+#include <dbgeng.h>
+#include <string>
+#include <vector>
+#include <memory>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// EngHost entry point
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags);
 
-__declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient4* Client, _In_opt_ PCSTR Args);
+// Extension command: !structscan <module!symbol_or_address> [max_offset_hex]
+__declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 
+#ifdef __cplusplus
+}
+#endif
 
-// All of these CbXXX functions are my implementations of the methods that you would
-// find on a IDebugCallbacks2 interface. I will put pointers to all of these functions
-// into a "lpVtbl" and set that onto my callback during the extension initialization routine.
-// All of these functions need to exist even if they don't do anything because the debug engine
-// will try to call them and enghost will crash if any function pointers are null.
+/**
+ * @class OutputCaptureCallback
+ * @brief Clean RAII Debugger Output Interceptor for WinDbg DbgEng
+ */
+class OutputCaptureCallback : public IDebugOutputCallbacks2 {
+private:
+    ULONG m_refCount{1};
+    std::wstring m_capturedOutput;
+    IDebugClient* m_client{nullptr};
+    PDEBUG_OUTPUT_CALLBACKS m_prevCallback{nullptr};
 
-ULONG __cdecl CbAddRef(IDebugOutputCallbacks2* This);
+public:
+    OutputCaptureCallback() = default;
 
-ULONG __cdecl CbQueryInterface(IDebugOutputCallbacks2* This, IN REFIID InterfaceId, OUT PVOID* Interface);
+    HRESULT Initialize(IDebugClient* client) {
+        m_client = client;
+        if (!m_client) return E_INVALIDARG;
 
-ULONG __cdecl CbRelease(IDebugOutputCallbacks2* This);
+        HRESULT hr = m_client->GetOutputCallbacks(&m_prevCallback);
+        if (FAILED(hr)) m_prevCallback = nullptr;
 
-HRESULT __cdecl CbGetInterestMask(IDebugOutputCallbacks2* This, OUT PULONG Mask);
+        return m_client->SetOutputCallbacks(reinterpret_cast<PDEBUG_OUTPUT_CALLBACKS>(this));
+    }
 
-HRESULT __stdcall CbOutput(IDebugOutputCallbacks2* This, IN ULONG Mask, IN PCSTR Text);
+    void Restore() {
+        if (m_client) {
+            m_client->SetOutputCallbacks(m_prevCallback);
+        }
+    }
 
-HRESULT __stdcall CbOutput2(IDebugOutputCallbacks2* This, IN ULONG Which, IN ULONG Flags, IN ULONG64 Arg, PCWSTR Text);
+    ~OutputCaptureCallback() { Restore(); }
+
+    void Clear() { m_capturedOutput.clear(); }
+    const std::wstring& GetOutput() const { return m_capturedOutput; }
+
+    // IUnknown
+    STDMETHODIMP QueryInterface(REFIID InterfaceId, PVOID* Interface) override {
+        if (InterfaceId == __uuidof(IUnknown) ||
+            InterfaceId == __uuidof(IDebugOutputCallbacks) ||
+            InterfaceId == __uuidof(IDebugOutputCallbacks2)) {
+            *Interface = static_cast<IDebugOutputCallbacks2*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *Interface = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    STDMETHODIMP_(ULONG) AddRef() override { return ++m_refCount; }
+    STDMETHODIMP_(ULONG) Release() override {
+        ULONG count = --m_refCount;
+        if (count == 0) delete this;
+        return count;
+    }
+
+    // IDebugOutputCallbacks
+    STDMETHODIMP Output(ULONG Mask, PCSTR Text) override {
+        if (Text) {
+            int wideLen = MultiByteToWideChar(CP_ACP, 0, Text, -1, nullptr, 0);
+            if (wideLen > 0) {
+                std::vector<wchar_t> wbuf(wideLen);
+                MultiByteToWideChar(CP_ACP, 0, Text, -1, wbuf.data(), wideLen);
+                m_capturedOutput += wbuf.data();
+            }
+        }
+        return S_OK;
+    }
+
+    // IDebugOutputCallbacks2
+    STDMETHODIMP GetInterestMask(PULONG Mask) override {
+        if (Mask) *Mask = DEBUG_OUTCBI_ANY_FORMAT;
+        return S_OK;
+    }
+
+    STDMETHODIMP Output2(ULONG Which, ULONG Flags, ULONG64 Arg, PCWSTR Text) override {
+        if (Text) {
+            m_capturedOutput += Text;
+        }
+        return S_OK;
+    }
+};
+
+#endif // STRUCTSCAN_MAIN_H
