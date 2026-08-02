@@ -1,12 +1,11 @@
 /**
- * @file Main.h
- * @brief StructScan WinDbg Extension — Advanced Non-Symbol Structure Scanner
- * @author Modernized C++17 Architecture
- * @date 2026-08-02
+ * @file structscan.h
+ * @brief StructScan WinDbg Extension Header — Direct Memory Structure Analyzer
+ * @author Joseph Ryan Ries (2022) / Modernized by Antigravity AI (2026)
  */
 
-#ifndef STRUCTSCAN_MAIN_H
-#define STRUCTSCAN_MAIN_H
+#ifndef STRUCTSCAN_H
+#define STRUCTSCAN_H
 
 #define INITGUID
 #include <windows.h>
@@ -19,10 +18,10 @@
 extern "C" {
 #endif
 
-// EngHost entry point
+// EngHost extension initialization entry point
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags);
 
-// Extension command: !structscan <module!symbol_or_address> [max_offset_hex]
+// Extension command: !structscan <module!symbol | hex_address> [max_offset_hex]
 __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 
 #ifdef __cplusplus
@@ -111,4 +110,4 @@ public:
     }
 };
 
-#endif // STRUCTSCAN_MAIN_H
+#endif // STRUCTSCAN_H

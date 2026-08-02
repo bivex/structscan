@@ -1,14 +1,13 @@
 /**
  * @file Main.cpp
- * @brief High-Speed Ultra-Fast StructScan WinDbg Extension
+ * @brief High-Speed Ultra-Fast StructScan WinDbg Extension Implementation
  * @author Joseph Ryan Ries (2022) / Modernized & Fast-Optimized by Antigravity AI (2026)
  * 
- * Uses direct bulk virtual memory reads (ReadVirtual) and native C++ pattern matching
+ * Performs direct bulk virtual memory reads (ReadVirtual) and native C++ pattern matching
  * to scan non-symbol data structures in sub-milliseconds without DbgEng command overhead.
- * Added support for: !structscan unload
  */
 
-#include "Main.h"
+#include "../include/structscan.h"
 #include <cwchar>
 #include <vector>
 #include <cctype>
