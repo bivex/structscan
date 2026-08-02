@@ -15,7 +15,7 @@
 #include <iostream>
 
 #define EXTENSION_VERSION_MAJOR 2
-#define EXTENSION_VERSION_MINOR 1
+#define EXTENSION_VERSION_MINOR 3
 
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags) {
     if (Version) *Version = DEBUG_EXTENSION_VERSION(EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
@@ -26,11 +26,6 @@ __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Ver
 // Helper: Check if character is printable ASCII
 inline bool IsPrintableAscii(uint8_t c) {
     return c >= 0x20 && c <= 0x7E;
-}
-
-// Helper: Check if character is printable WCHAR
-inline bool IsPrintableWchar(wchar_t c) {
-    return (c >= 0x0020 && c <= 0x007E) || c == L'\t' || c == L'\n' || c == L'\r';
 }
 
 __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args) {
@@ -57,10 +52,8 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
     // Support !structscan unload
     if (_wcsicmp(wideArgs, L"unload") == 0) {
         DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] Unloading structscan extension...\n");
+        DebugControl->ExecuteWide(DEBUG_OUTCTL_ALL_CLIENTS, L".unload structscan.dll", DEBUG_EXECUTE_DEFAULT);
         DebugControl->ExecuteWide(DEBUG_OUTCTL_ALL_CLIENTS, L".unload structscan", DEBUG_EXECUTE_DEFAULT);
-        DebugControl->ExecuteWide(DEBUG_OUTCTL_ALL_CLIENTS, L".unload structscan_arm64", DEBUG_EXECUTE_DEFAULT);
-        DebugControl->ExecuteWide(DEBUG_OUTCTL_ALL_CLIENTS, L".unload structscan_v2", DEBUG_EXECUTE_DEFAULT);
-        DebugControl->ExecuteWide(DEBUG_OUTCTL_ALL_CLIENTS, L".unload structscan_fast", DEBUG_EXECUTE_DEFAULT);
         goto Exit;
     }
 
@@ -128,13 +121,12 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
         std::vector<uint8_t> buffer(maxScanOffset);
         ULONG bytesRead = 0;
 
-        // BULK READ ENTIRE STRUCTURE MEMORY BLOCK AT ONCE (Zero DbgEng Command Overhead!)
         if (FAILED(DataSpaces->ReadVirtual(symbolAddress, buffer.data(), maxScanOffset, &bytesRead)) || bytesRead == 0) {
             DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Failed to read virtual memory at 0x%p\n", reinterpret_cast<void*>(symbolAddress));
             goto Exit;
         }
 
-        size_t matchCount = 0;
+        ULONG matchCount = 0;
 
         for (ULONG offset = 0; offset + sizeof(uint64_t) <= bytesRead; offset += 8) {
             if (DebugControl->GetInterrupt() == S_OK) {
@@ -145,7 +137,7 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
             ULONG64 currentAddr = symbolAddress + offset;
             const uint8_t* ptr = buffer.data() + offset;
 
-            // 1. Check UNICODE_STRING pattern (Length: uint16_t, MaxLength: uint16_t, Buffer: uint64_t)
+            // 1. Check UNICODE_STRING pattern
             uint16_t uLen = *reinterpret_cast<const uint16_t*>(ptr);
             uint16_t uMaxLen = *reinterpret_cast<const uint16_t*>(ptr + 2);
             if (offset + 16 <= bytesRead) {
@@ -155,7 +147,7 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
                     ULONG uRead = 0;
                     if (SUCCEEDED(DataSpaces->ReadVirtual(uBufPtr, wstr.data(), uLen, &uRead)) && uRead > 0) {
                         DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  +0x%04lx [0x%p] (UNICODE_STRING %u/%u B): %s\n",
-                            offset, reinterpret_cast<void*>(currentAddr), uLen, uMaxLen, wstr.data());
+                            offset, reinterpret_cast<void*>(currentAddr), static_cast<unsigned int>(uLen), static_cast<unsigned int>(uMaxLen), wstr.data());
                         matchCount++;
                     }
                 }
@@ -167,9 +159,12 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
                 asciiLen++;
             }
             if (asciiLen >= 4) {
-                std::string str(reinterpret_cast<const char*>(ptr), asciiLen);
-                DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  +0x%04lx [0x%p] (ASCII String %zu B): %S\n",
-                    offset, reinterpret_cast<void*>(currentAddr), asciiLen, str.c_str());
+                std::wstring wstr(asciiLen, L'\0');
+                for (size_t i = 0; i < asciiLen; ++i) {
+                    wstr[i] = static_cast<wchar_t>(ptr[i]);
+                }
+                DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  +0x%04lx [0x%p] (ASCII String %u B): %s\n",
+                    offset, reinterpret_cast<void*>(currentAddr), static_cast<unsigned int>(asciiLen), wstr.c_str());
                 matchCount++;
             }
 
@@ -186,7 +181,7 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
             }
         }
 
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n[+] Scan Complete: %zu interesting fields identified.\n", matchCount);
+        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n[+] Scan Complete: %u interesting fields identified.\n", static_cast<unsigned int>(matchCount));
     }
 
 Exit:
