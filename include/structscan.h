@@ -113,17 +113,81 @@ struct PoolTagInfo {
 };
 
 static constexpr PoolTagInfo kKnownPoolTags[] = {
-    { 'corP', "EPROCESS",                 0xB80  },   // 'Proc' reversed LE
-    { 'erhT', "ETHREAD",                  0x5C0  },   // 'Thre' reversed LE
-    { 'eliF', "FILE_OBJECT",              0x120  },   // 'File' reversed LE
-    { 'virD', "DRIVER_OBJECT",            0x150  },   // 'Driv' reversed LE
-    { 'iveD', "DEVICE_OBJECT",            0x200  },   // 'Devi' reversed LE
-    { ' yeK', "CMKEY_BODY (Registry)",    0x68   },   // 'Key ' reversed LE
-    { 'TnI ', "IRP",                      0x118  },   // ' InT' reversed LE
-    { 'teME', "ETW_GUID_ENTRY",           0x50   },
-    { 'looP', "Pool descriptor",          0       },
-    { 'mVtN', "NtVm region",              0       },
-    { '  oI', "IO_STATUS_BLOCK",          0x10   },
+    // Executive Objects & Processes
+    { 'corP', "EPROCESS (Process)",         0xB80 },   // 'Proc'
+    { 'erhT', "ETHREAD (Thread)",           0x5C0 },   // 'Thre'
+    { 'eliF', "FILE_OBJECT (File)",         0x120 },   // 'File'
+    { 'virD', "DRIVER_OBJECT (Driver)",     0x150 },   // 'Driv'
+    { 'iveD', "DEVICE_OBJECT (Device)",     0x200 },   // 'Devi'
+    { ' ekoT', "TOKEN (Security Token)",    0x300 },   // 'Toke'
+    { ' troP', "ALPC_PORT (LPC/ALPC Port)", 0x180 },   // 'Port'
+    { '  boJ', "JOB (Job Object)",          0x280 },   // 'Job '
+    { '  tnE', "KEVENT (Kernel Event)",     0x18  },   // 'Entv' / 'Evnt'
+    { '  xM',  "KMUTANT (Mutex)",           0x38  },   // 'Mutx'
+    { '  meS', "KSEMAPHORE (Semaphore)",    0x20  },   // 'Sem '
+    { '  mTI', "KTIMER (Timer)",            0x40  },   // 'Timr'
+    { '  tceS', "SECTION (Memory Section)", 0x90  },   // 'Sect'
+    { '  bmyS', "OBJECT_SYMBOLIC_LINK",     0x48  },   // 'Symb'
+    { '  riD', "OBJECT_DIRECTORY (Folder)", 0x200 },   // 'Dir '
+
+    // Registry & I/O Subsystem
+    { ' yeK', "CMKEY_BODY (Registry Key)",  0x68  },   // 'Key '
+    { 'TnI ', "IRP (I/O Request Packet)",   0x118 },   // ' InT'
+    { '  oI', "IO_STATUS_BLOCK",            0x10  },   // 'Io  '
+    { ' sFN', "NTFS Control Block",         0x100 },   // 'NFs '
+    { ' ylF', "Filter Manager Data",        0x80  },   // 'Fly '
+    { ' tLF', "Filter Manager Callback",    0x40  },   // 'FLt '
+
+    // Memory Manager & Paging
+    { 'looP', "Pool Descriptor",            0     },   // 'Pool'
+    { 'mVtN', "NtVm Region",                0     },   // 'NtVm'
+    { 'paeH', "Heap Allocation",            0     },   // 'Heap'
+    { 'mLmM', "MDL (Memory Descriptor)",    0x30  },   // 'MmMl'
+    { 'kLmM', "Mm Locked Pages",            0     },   // 'MmLk'
+    { 'wVmM', "Mm View (MMVIEW)",           0     },   // 'MmVw'
+    { 'paWS', "Paging File / Swap",         0     },   // 'SWap'
+    { ' etP', "PTE (Page Table Entry)",     0x8   },   // 'Pte '
+
+    // Security & Access Control
+    { ' lcA', "ACL (Access Control List)",  0     },   // 'Acl '
+    { 'uceS', "SECURITY_DESCRIPTOR",        0     },   // 'Secu'
+
+    // Executive System & Threads
+    { 'mSyS', "System Memory Allocation",   0     },   // 'Sysm'
+    { ' xWk', "WORK_QUEUE_ITEM",            0x20  },   // 'kWx '
+    { ' SDC', "Code Integrity / CI",        0     },   // 'CDS '
+    { 'gDmA', "DMA Adapter",                0     },   // 'AmDg'
+
+    // Networking (TCB, NDIS, NetBT)
+    { ' dND', "NDIS Driver Block",          0x200 },   // 'DNd '
+    { ' kTN', "NetBT Network Buffer",       0     },   // 'NTk '
+    { ' cTC', "TCP Connection Block (TCB)", 0x300 },   // 'CTc '
+    { ' pTU', "UDP Endpoint Block",         0x100 },   // 'UTp '
+    { ' sFI', "RDBSS / IFS Mini-Redirector",0     },   // 'IFs '
+
+    // ETW & Telemetry
+    { 'teME', "ETW_GUID_ENTRY",             0x50  },   // 'EMet'
+    { ' tCE', "ETW Trace Session",          0x100 },   // 'ECt '
+    { ' pTE', "ETW Provider Object",        0x80  },   // 'ETp '
+    { ' rCE', "ETW Realtime Consumer",      0x80  },   // 'ECr '
+
+    // WMI Diagnostics
+    { ' bKW', "WMI Buffer",                 0x1000},   // 'WKb '
+    { ' gKW', "WMI GUID Object",            0x60  },   // 'WKg '
+    { ' lCW', "WPP Trace Log",              0     },   // 'WCl '
+
+    // Plug and Play (PnP) & Power Manager
+    { ' aKP', "PnP Auto-Play / Arrival",    0     },   // 'PKa '
+    { ' dKP', "DEVICE_NODE (PnP DevNode)",  0x1c0 },   // 'PKd '
+    { ' rKP', "PnP Relation List",          0     },   // 'PKr '
+    { ' dVP', "Power Manager State",        0     },   // 'PVd '
+    { ' iRP', "Power Request Object",       0x80  },   // 'PRi '
+
+    // Hyper-V & Virtualization
+    { ' hvW', "Hyper-V Hypervisor Call",    0     },   // 'Wvh '
+    { ' sVH', "Hyper-V Synthetic Device",   0     },   // 'HVs '
+    { ' mSH', "Hyper-V Shared Memory",      0     },   // 'HSm '
+    { ' rVH', "Hyper-V Root Partition",     0     },   // 'HVr '
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
