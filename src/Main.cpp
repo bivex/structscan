@@ -74,11 +74,11 @@ static ULONG64 ResolveTarget(
     return result;
 }
 
-// Confidence bar  [████░░░░]
+// Confidence bar  [####----]
 static std::wstring ConfBar(double conf, int width = 8) {
     std::wstring bar = L"[";
     int filled = static_cast<int>(conf * width + 0.5);
-    for (int i = 0; i < width; i++) bar += (i < filled) ? L'█' : L'░';
+    for (int i = 0; i < width; i++) bar += (i < filled) ? L'#' : L'-';
     bar += L"]";
     return bar;
 }
@@ -140,7 +140,7 @@ static HRESULT DoSingleScan(
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"  Offset    Address               Type              Entropy  Confidence  Annotation\n");
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"  ────────  ────────────────────  ────────────────  ───────  ──────────  ──────────────────────────────\n");
+        L"  --------  --------------------  ----------------  -------  ----------  ------------------------------\n");
 
     std::vector<uint8_t> buf(scanWindow);
     ULONG rd = 0;
@@ -238,7 +238,7 @@ static HRESULT DoListCrossRef(
             leAnnot = symBuf;
 
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"[+] Detected LIST_ENTRY at struct+0x%04lx  Flink→%s\n",
+            L"[+] Detected LIST_ENTRY at struct+0x%04lx  Flink->%s\n",
             static_cast<unsigned long>(le.offset),
             leAnnot.empty() ? L"<no symbol>" : leAnnot.c_str());
     }
@@ -265,7 +265,7 @@ static HRESULT DoListCrossRef(
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"  Offset    Type              Consistency  Unique Values  Annotation\n");
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"  ────────  ────────────────  ───────────  ─────────────  ────────────────────────────────\n");
+        L"  --------  ----------------  -----------  -------------  --------------------------------\n");
 
     ULONG reported = 0;
     for (auto& prof : profiles) {
@@ -355,7 +355,7 @@ static HRESULT DoEntropyMap(
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"  Offset    H(bits)  Bar                        Notes\n");
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"  ────────  ───────  ─────────────────────────  ────────────────\n");
+        L"  --------  -------  -------------------------  ----------------\n");
 
     // 16-byte windows for entropy heatmap
     for (ULONG off = 0; off + 16 <= rd; off += 16) {
@@ -366,16 +366,16 @@ static HRESULT DoEntropyMap(
         bar.reserve(24);
         for (int i = 0; i < 24; i++) {
             if (i < barW)
-                bar += (H > 6.5) ? L'█' : (H > 3.5) ? L'▓' : (H > 1.5) ? L'▒' : L'░';
+                bar += (H > 6.5) ? L'#' : (H > 3.5) ? L'*' : (H > 1.5) ? L'+' : L'.';
             else
                 bar += L' ';
         }
 
         const wchar_t* note = L"";
-        if (H < 0.5)        note = L"← Zero/Padding";
-        else if (H < 2.0)   note = L"← Counter/Flag";
-        else if (H < 4.0)   note = L"← String/Tag";
-        else if (H > 7.0)   note = L"← Pointer/Crypto";
+        if (H < 0.5)        note = L"<- Zero/Padding";
+        else if (H < 2.0)   note = L"<- Counter/Flag";
+        else if (H < 4.0)   note = L"<- String/Tag";
+        else if (H > 7.0)   note = L"<- Pointer/Crypto";
 
         wchar_t line[256] = {};
         swprintf_s(line, L"  +0x%04lx   %5.2f    %s  %s\n",
@@ -418,18 +418,18 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
     // ── help / empty ────────────────────────────────────────────────────────
     if (tokenCount <= 0 || wcslen(tok0) == 0) {
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"══════════════════════════════════════════════════════════════\n");
+            L"==============================================================\n");
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L" StructScan v%d.%d — Intelligent Structure Reconstruction Engine\n",
+            L" StructScan v%d.%d - Intelligent Structure Reconstruction Engine\n",
             EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"══════════════════════════════════════════════════════════════\n\n");
+            L"==============================================================\n\n");
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L" USAGE:\n"
-            L"   !structscan <sym|addr> [size]          — Bayesian single-instance scan\n"
-            L"   !structscan list <sym|addr> [size]     — Multi-instance cross-reference\n"
-            L"   !structscan entropy <sym|addr> [size]  — Shannon entropy heatmap\n"
-            L"   !structscan unload                     — Unload hint\n\n"
+            L"   !structscan <sym|addr> [size]          - Bayesian single-instance scan\n"
+            L"   !structscan list <sym|addr> [size]     - Multi-instance cross-reference\n"
+            L"   !structscan entropy <sym|addr> [size]  - Shannon entropy heatmap\n"
+            L"   !structscan unload                     - Unload hint\n\n"
             L" EXAMPLES:\n"
             L"   !structscan nt!PsInitialSystemProcess 0x400\n"
             L"   !structscan list nt!PsActiveProcessHead 0x800\n"
