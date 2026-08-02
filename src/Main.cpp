@@ -14,12 +14,16 @@
 #include <iostream>
 
 #define EXTENSION_VERSION_MAJOR 2
-#define EXTENSION_VERSION_MINOR 4
+#define EXTENSION_VERSION_MINOR 5
 
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags) {
     if (Version) *Version = DEBUG_EXTENSION_VERSION(EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
     if (Flags) *Flags = 0;
     return S_OK;
+}
+
+__declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void) {
+    // Clean cleanup when WinDbg executes .unload
 }
 
 // Helper: Check if character is printable ASCII
@@ -48,25 +52,10 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
         mbstowcs_s(&converted, wideArgs, _countof(wideArgs), Args, _TRUNCATE);
     }
 
-    // Support !structscan unload cleanly
+    // Support !structscan unload cleanly without self-referential FreeLibrary hang
     if (_wcsicmp(wideArgs, L"unload") == 0) {
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] Unloading structscan extension...\n");
-        
-        // Execute unload command for all possible loaded aliases
-        const wchar_t* unloadCmds[] = {
-            L".unload structscan.dll",
-            L".unload structscan",
-            L".unload structscan_arm64.dll",
-            L".unload structscan_arm64",
-            L".unload structscan_x64.dll",
-            L".unload structscan_x64",
-            L".unload structscan_x86.dll",
-            L".unload structscan_x86"
-        };
-
-        for (size_t i = 0; i < _countof(unloadCmds); ++i) {
-            DebugControl->ExecuteWide(DEBUG_OUTCTL_ALL_CLIENTS, unloadCmds[i], DEBUG_EXECUTE_NOT_LOGGED);
-        }
+        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] To unload this extension cleanly in WinDbg, execute:\n");
+        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"    .unload structscan\n\n");
         goto Exit;
     }
 
