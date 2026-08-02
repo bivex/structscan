@@ -1,194 +1,483 @@
 /**
  * @file Main.cpp
- * @brief High-Speed Ultra-Fast StructScan WinDbg Extension Implementation
- * @author Joseph Ryan Ries (2022) / Modernized & Fast-Optimized by Antigravity AI (2026)
- * 
- * Performs direct bulk virtual memory reads (ReadVirtual) and native C++ pattern matching
- * to scan non-symbol data structures in sub-milliseconds without DbgEng command overhead.
+ * @brief StructScan v3.0 — Intelligent Multi-Algorithm Structure Reconstruction Engine
+ * @author Joseph Ryan Ries (2022) / Modernized & AI-Enhanced by Antigravity AI (2026)
+ *
+ * Commands:
+ *   !structscan <sym|addr> [size]          — single-instance smart scan
+ *   !structscan list <sym|addr> [size]     — multi-instance LIST_ENTRY cross-reference
+ *   !structscan entropy <sym|addr> [size]  — raw entropy heatmap only
+ *   !structscan unload                     — safe unload hint
  */
 
 #include "../include/structscan.h"
 #include <cwchar>
-#include <vector>
-#include <cctype>
-#include <iostream>
+#include <cstdio>
 
-#define EXTENSION_VERSION_MAJOR 2
-#define EXTENSION_VERSION_MINOR 5
+#define EXTENSION_VERSION_MAJOR 3
+#define EXTENSION_VERSION_MINOR 0
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extension lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
 
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags) {
     if (Version) *Version = DEBUG_EXTENSION_VERSION(EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
-    if (Flags) *Flags = 0;
+    if (Flags)   *Flags   = 0;
     return S_OK;
 }
 
-__declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void) {
-    // Clean cleanup when WinDbg executes .unload
+__declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void) {}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Resolve symbol or hex address → ULONG64
+static ULONG64 ResolveTarget(
+    IDebugControl4*  ctrl,
+    IDebugSymbols4*  sym,
+    const wchar_t*   token,
+    ULONG64*         outModBase = nullptr,
+    wchar_t*         outModName = nullptr,
+    size_t           modNameCch = 0,
+    ULONG*           outModSize = nullptr
+) {
+    // Try direct hex parse
+    wchar_t* end = nullptr;
+    ULONG64 addr = wcstoull(token, &end, 16);
+    if (end != token && *end == L'\0' && addr >= 0x10000) return addr;
+
+    // Symbol lookup
+    wchar_t modName[128] = {};
+    wchar_t* bang = const_cast<wchar_t*>(wcschr(token, L'!'));
+    if (bang) {
+        wcsncpy_s(modName, token, bang - token);
+        ULONG idx = 0; ULONG64 modBase = 0;
+        if (SUCCEEDED(sym->GetModuleByModuleNameWide(modName, 0, &idx, &modBase))) {
+            if (outModBase) *outModBase = modBase;
+            if (outModName && modNameCch) wcsncpy_s(outModName, modNameCch, modName, _TRUNCATE);
+            if (outModSize) {
+                DEBUG_MODULE_PARAMETERS mp = {};
+                sym->GetModuleParameters(1, nullptr, idx, &mp);
+                *outModSize = mp.Size;
+            }
+        }
+    }
+
+    ULONG64 searchHandle = 0;
+    ULONG64 result = 0;
+    if (SUCCEEDED(sym->StartSymbolMatchWide(token, &searchHandle))) {
+        sym->GetNextSymbolMatch(searchHandle, nullptr, 0, 0, &result);
+        sym->EndSymbolMatch(searchHandle);
+    }
+    return result;
 }
 
-// Helper: Check if character is printable ASCII
-inline bool IsPrintableAscii(uint8_t c) {
-    return c >= 0x20 && c <= 0x7E;
+// Confidence bar  [████░░░░]
+static std::wstring ConfBar(double conf, int width = 8) {
+    std::wstring bar = L"[";
+    int filled = static_cast<int>(conf * width + 0.5);
+    for (int i = 0; i < width; i++) bar += (i < filled) ? L'█' : L'░';
+    bar += L"]";
+    return bar;
 }
+
+// Print single FieldAnalysis result line
+static void PrintField(IDebugControl4* ctrl, const FieldAnalysis& fa) {
+    if (fa.type == FieldType::Unknown || fa.type == FieldType::Padding) return;
+
+    wchar_t line[512] = {};
+    std::wstring bar = ConfBar(fa.confidence);
+
+    swprintf_s(line,
+        L"  +0x%04lx  [0x%016llx]  %-16s  H=%.2f  %s  %s\n",
+        fa.offset,
+        static_cast<unsigned long long>(fa.address),
+        FieldTypeName(fa.type),
+        fa.entropy,
+        bar.c_str(),
+        fa.annotation.c_str()
+    );
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"%s", line);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mode 1: Single-Instance Smart Scan
+// ─────────────────────────────────────────────────────────────────────────────
+
+static HRESULT DoSingleScan(
+    IDebugControl4*    ctrl,
+    IDebugSymbols4*    sym,
+    IDebugDataSpaces4* ds,
+    const wchar_t*     target,
+    ULONG              scanWindow
+) {
+    wchar_t modName[128] = {};
+    ULONG64 modBase = 0; ULONG modSize = 0;
+    ULONG64 addr = ResolveTarget(ctrl, sym, target, &modBase, modName, _countof(modName), &modSize);
+
+    if (addr == 0) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Cannot resolve: %s\n", target);
+        return E_FAIL;
+    }
+
+    if (modBase) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[+] Module: %s | Base: 0x%016llx | Size: 0x%lx\n",
+            modName,
+            static_cast<unsigned long long>(modBase),
+            static_cast<unsigned long>(modSize));
+    }
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"[+] Target: 0x%016llx | Scan: 0x%lx bytes\n",
+        static_cast<unsigned long long>(addr),
+        static_cast<unsigned long>(scanWindow));
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"[+] Algorithm: Bayesian Field Classifier v3.0 (Shannon Entropy + Multi-feature)\n\n");
+
+    // Print header
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  Offset    Address               Type              Entropy  Confidence  Annotation\n");
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  ────────  ────────────────────  ────────────────  ───────  ──────────  ──────────────────────────────\n");
+
+    std::vector<uint8_t> buf(scanWindow);
+    ULONG rd = 0;
+    if (FAILED(ds->ReadVirtual(addr, buf.data(), scanWindow, &rd)) || rd == 0) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] ReadVirtual failed at 0x%016llx\n",
+            static_cast<unsigned long long>(addr));
+        return E_FAIL;
+    }
+
+    SmartFieldAnalyzer analyzer;
+    analyzer.DataSpaces = ds;
+    analyzer.Symbols    = sym;
+
+    ULONG count = 0;
+    for (ULONG off = 0; off + 8 <= rd; off += 8) {
+        if (ctrl->GetInterrupt() == S_OK) {
+            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n[*] Aborted by user (Ctrl+C)\n");
+            break;
+        }
+        auto fa = analyzer.Analyze(buf.data(), rd, off, addr);
+        if (fa.type != FieldType::Unknown && fa.type != FieldType::Padding && fa.confidence > 0.25) {
+            PrintField(ctrl, fa);
+            count++;
+        }
+    }
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n[+] Complete: %lu fields identified (confidence > 25%%)\n",
+        static_cast<unsigned long>(count));
+    return S_OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mode 2: Multi-Instance LIST_ENTRY Cross-Reference
+// ─────────────────────────────────────────────────────────────────────────────
+
+static HRESULT DoListCrossRef(
+    IDebugControl4*    ctrl,
+    IDebugSymbols4*    sym,
+    IDebugDataSpaces4* ds,
+    const wchar_t*     target,
+    ULONG              scanWindow
+) {
+    ULONG64 headAddr = ResolveTarget(ctrl, sym, target, nullptr, nullptr, 0, nullptr);
+    if (headAddr == 0) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Cannot resolve: %s\n", target);
+        return E_FAIL;
+    }
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"[+] LIST_ENTRY head: 0x%016llx\n",
+        static_cast<unsigned long long>(headAddr));
+
+    // ── Phase 1: Discover LIST_ENTRY offsets inside first object ─────────────
+    // Read the first object and find LIST_ENTRY candidates
+    std::vector<uint8_t> buf0(scanWindow);
+    ULONG rd0 = 0;
+    if (FAILED(ds->ReadVirtual(headAddr, buf0.data(), scanWindow, &rd0)) || rd0 < 16) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Cannot read head object\n");
+        return E_FAIL;
+    }
+
+    SmartFieldAnalyzer analyzer;
+    analyzer.DataSpaces = ds;
+    analyzer.Symbols    = sym;
+
+    // Find all LIST_ENTRY offsets in first object
+    struct ListEntryCandidate { ULONG offset; ULONG64 flink; ULONG64 blink; };
+    std::vector<ListEntryCandidate> listCandidates;
+
+    for (ULONG off = 0; off + 16 <= rd0; off += 8) {
+        uint64_t flink = *reinterpret_cast<const uint64_t*>(buf0.data() + off);
+        uint64_t blink = *reinterpret_cast<const uint64_t*>(buf0.data() + off + 8);
+        if (flink > 0xFFFF000000000000ULL && blink > 0xFFFF000000000000ULL && flink != blink) {
+            uint64_t flinkBlink = 0; ULONG rdx = 0;
+            if (SUCCEEDED(ds->ReadVirtual(flink + 8, &flinkBlink, 8, &rdx)) && rdx == 8) {
+                if (flinkBlink == (headAddr + off) || flinkBlink == blink) {
+                    listCandidates.push_back({ off, flink, blink });
+                }
+            }
+        }
+    }
+
+    if (listCandidates.empty()) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[-] No valid LIST_ENTRY found in object. Try !structscan <sym> first to locate list offsets.\n");
+        return E_FAIL;
+    }
+
+    // Use the first valid LIST_ENTRY found (or try all)
+    for (auto& le : listCandidates) {
+        wchar_t symBuf[256] = {}; ULONG64 disp = 0;
+        std::wstring leAnnot;
+        if (SUCCEEDED(sym->GetNameByOffsetWide(le.flink, symBuf, _countof(symBuf), nullptr, &disp)))
+            leAnnot = symBuf;
+
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[+] Detected LIST_ENTRY at struct+0x%04lx  Flink→%s\n",
+            static_cast<unsigned long>(le.offset),
+            leAnnot.empty() ? L"<no symbol>" : leAnnot.c_str());
+    }
+
+    // ── Phase 2: Walk the list, collect struct base addresses ─────────────────
+    auto& best = listCandidates[0];
+    ULONG64 leHead  = headAddr + best.offset;  // addr of LIST_ENTRY in head
+    std::vector<ULONG64> instances = CrossRefEngine::WalkListEntry(ds, leHead, best.offset, 64);
+
+    if (instances.empty()) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] List appears empty or head == self (empty list)\n");
+        return S_OK;
+    }
+    // Include head object itself
+    instances.insert(instances.begin(), headAddr);
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"[+] Collected %llu struct instances for cross-reference analysis\n\n",
+        static_cast<unsigned long long>(instances.size()));
+
+    // ── Phase 3: Cross-reference analysis ─────────────────────────────────────
+    auto profiles = CrossRefEngine::Analyze(ds, sym, instances, scanWindow);
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  Offset    Type              Consistency  Unique Values  Annotation\n");
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  ────────  ────────────────  ───────────  ─────────────  ────────────────────────────────\n");
+
+    ULONG reported = 0;
+    for (auto& prof : profiles) {
+        if (!prof.isInteresting) continue;
+
+        // Count unique values across instances
+        std::vector<uint64_t> sorted = prof.rawValues;
+        std::sort(sorted.begin(), sorted.end());
+        size_t uniqueVals = std::unique(sorted.begin(), sorted.end()) - sorted.begin();
+
+        // Sample annotation from first instance that has a pointer
+        std::wstring annotation;
+        for (size_t i = 0; i < prof.rawValues.size() && annotation.empty(); i++) {
+            uint64_t v = prof.rawValues[i];
+            if (v > 0xFFFF000000000000ULL && prof.dominantType == FieldType::Pointer) {
+                wchar_t sn[256] = {}; ULONG64 d = 0;
+                if (SUCCEEDED(sym->GetNameByOffsetWide(v, sn, _countof(sn), nullptr, &d))) {
+                    annotation = sn;
+                    if (d) { annotation += L"+..."; }
+                    annotation += L" (varies)";
+                }
+            }
+        }
+        if (annotation.empty() && prof.dominantType == FieldType::AsciiString) {
+            // Show distinct string values
+            std::wstring vals;
+            size_t shown = 0;
+            for (size_t i = 0; i < instances.size() && shown < 3; i++) {
+                std::vector<uint8_t> b(8);
+                ULONG rr = 0;
+                if (SUCCEEDED(ds->ReadVirtual(instances[i] + prof.offset, b.data(), 8, &rr))) {
+                    std::wstring s;
+                    for (auto c : b) if (c >= 0x20 && c <= 0x7E) s += static_cast<wchar_t>(c); else break;
+                    if (!s.empty()) { if (!vals.empty()) vals += L"|"; vals += L"\"" + s + L"\""; shown++; }
+                }
+            }
+            annotation = vals;
+        }
+
+        wchar_t line[512] = {};
+        swprintf_s(line,
+            L"  +0x%04lx   %-16s  %3.0f%%         %llu/%llu          %s\n",
+            static_cast<unsigned long>(prof.offset),
+            FieldTypeName(prof.dominantType),
+            prof.typeConsistency * 100.0,
+            static_cast<unsigned long long>(uniqueVals),
+            static_cast<unsigned long long>(prof.rawValues.size()),
+            annotation.c_str()
+        );
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"%s", line);
+        reported++;
+    }
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n[+] Cross-reference complete: %lu consistent fields identified across %llu instances\n",
+        static_cast<unsigned long>(reported),
+        static_cast<unsigned long long>(instances.size()));
+    return S_OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mode 3: Entropy Heatmap
+// ─────────────────────────────────────────────────────────────────────────────
+
+static HRESULT DoEntropyMap(
+    IDebugControl4*    ctrl,
+    IDebugDataSpaces4* ds,
+    const wchar_t*     target,
+    IDebugSymbols4*    sym,
+    ULONG              scanWindow
+) {
+    ULONG64 addr = ResolveTarget(ctrl, sym, target, nullptr, nullptr, 0, nullptr);
+    if (addr == 0) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Cannot resolve: %s\n", target);
+        return E_FAIL;
+    }
+
+    std::vector<uint8_t> buf(scanWindow);
+    ULONG rd = 0;
+    if (FAILED(ds->ReadVirtual(addr, buf.data(), scanWindow, &rd)) || rd == 0) return E_FAIL;
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"[+] Entropy Heatmap for 0x%016llx (%lu bytes)\n\n",
+        static_cast<unsigned long long>(addr),
+        static_cast<unsigned long>(rd));
+
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  Offset    H(bits)  Bar                        Notes\n");
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  ────────  ───────  ─────────────────────────  ────────────────\n");
+
+    // 16-byte windows for entropy heatmap
+    for (ULONG off = 0; off + 16 <= rd; off += 16) {
+        double H = SmartFieldAnalyzer::ComputeEntropy(buf.data() + off, 16);
+        int barW = static_cast<int>(H / 8.0 * 24 + 0.5);
+
+        std::wstring bar;
+        bar.reserve(24);
+        for (int i = 0; i < 24; i++) {
+            if (i < barW)
+                bar += (H > 6.5) ? L'█' : (H > 3.5) ? L'▓' : (H > 1.5) ? L'▒' : L'░';
+            else
+                bar += L' ';
+        }
+
+        const wchar_t* note = L"";
+        if (H < 0.5)        note = L"← Zero/Padding";
+        else if (H < 2.0)   note = L"← Counter/Flag";
+        else if (H < 4.0)   note = L"← String/Tag";
+        else if (H > 7.0)   note = L"← Pointer/Crypto";
+
+        wchar_t line[256] = {};
+        swprintf_s(line, L"  +0x%04lx   %5.2f    %s  %s\n",
+            static_cast<unsigned long>(off), H, bar.c_str(), note);
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"%s", line);
+    }
+    return S_OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main extension entry point
+// ─────────────────────────────────────────────────────────────────────────────
 
 __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args) {
     if (!Client) return E_INVALIDARG;
 
+    IDebugControl4*    ctrl = nullptr;
+    IDebugSymbols4*    sym  = nullptr;
+    IDebugDataSpaces4* ds   = nullptr;
     HRESULT hr = S_OK;
-    IDebugControl4* DebugControl = nullptr;
-    IDebugSymbols4* Symbols = nullptr;
-    IDebugDataSpaces4* DataSpaces = nullptr;
 
-    if (FAILED(Client->QueryInterface(__uuidof(IDebugControl4), (void**)&DebugControl))) return E_FAIL;
-    if (FAILED(Client->QueryInterface(__uuidof(IDebugSymbols4), (void**)&Symbols))) {
-        DebugControl->Release();
-        return E_FAIL;
-    }
-    Client->QueryInterface(__uuidof(IDebugDataSpaces4), (void**)&DataSpaces);
+    if (FAILED(Client->QueryInterface(__uuidof(IDebugControl4),    (void**)&ctrl))) return E_FAIL;
+    if (FAILED(Client->QueryInterface(__uuidof(IDebugSymbols4),    (void**)&sym)))  { ctrl->Release(); return E_FAIL; }
+    if (FAILED(Client->QueryInterface(__uuidof(IDebugDataSpaces4), (void**)&ds)))   { sym->Release(); ctrl->Release(); return E_FAIL; }
 
-    wchar_t wideArgs[256] = { 0 };
-    if (Args && strlen(Args) > 0) {
-        size_t converted = 0;
-        mbstowcs_s(&converted, wideArgs, _countof(wideArgs), Args, _TRUNCATE);
+    // Parse args
+    wchar_t wargs[512] = {};
+    if (Args && *Args) {
+        size_t c = 0;
+        mbstowcs_s(&c, wargs, _countof(wargs), Args, _TRUNCATE);
     }
 
-    // Support !structscan unload cleanly without self-referential FreeLibrary hang
-    if (_wcsicmp(wideArgs, L"unload") == 0) {
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] To unload this extension cleanly in WinDbg, execute:\n");
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"    .unload structscan\n\n");
+    // Tokenize: mode, target, [size]
+    wchar_t tok0[128] = {}, tok1[128] = {}, tok2[128] = {};
+    int tokenCount = swscanf_s(wargs, L"%127s %127s %127s",
+        tok0, (unsigned)_countof(tok0),
+        tok1, (unsigned)_countof(tok1),
+        tok2, (unsigned)_countof(tok2));
+
+    // ── help / empty ────────────────────────────────────────────────────────
+    if (tokenCount <= 0 || wcslen(tok0) == 0) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"══════════════════════════════════════════════════════════════\n");
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L" StructScan v%d.%d — Intelligent Structure Reconstruction Engine\n",
+            EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"══════════════════════════════════════════════════════════════\n\n");
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L" USAGE:\n"
+            L"   !structscan <sym|addr> [size]          — Bayesian single-instance scan\n"
+            L"   !structscan list <sym|addr> [size]     — Multi-instance cross-reference\n"
+            L"   !structscan entropy <sym|addr> [size]  — Shannon entropy heatmap\n"
+            L"   !structscan unload                     — Unload hint\n\n"
+            L" EXAMPLES:\n"
+            L"   !structscan nt!PsInitialSystemProcess 0x400\n"
+            L"   !structscan list nt!PsActiveProcessHead 0x800\n"
+            L"   !structscan entropy fffff802ac809ab0 0x200\n\n");
         goto Exit;
     }
 
-    if (wcslen(wideArgs) == 0) {
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"=============================================================\n");
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L" StructScan v%d.%d — High-Speed Direct Memory Structure Scanner \n", EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"=============================================================\n\n");
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"USAGE: !structscan <module!symbol | hex_address> [max_offset_hex]\n");
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"       !structscan unload\n");
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"EXAMPLE: !structscan nt!PsInitialSystemProcess 0x400\n");
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"EXAMPLE: !structscan fffff802ac809ab0 0x200\n\n");
+    // ── unload ──────────────────────────────────────────────────────────────
+    if (_wcsicmp(tok0, L"unload") == 0) {
+        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[+] Run: .unload structscan\n");
         goto Exit;
     }
 
-    ULONG64 symbolAddress = 0;
-    ULONG maxScanOffset = 0x400; // Default scan window: 1024 bytes
-
-    wchar_t targetToken[128] = { 0 };
-    wchar_t offsetToken[128] = { 0 };
-
-    swscanf_s(wideArgs, L"%s %s", targetToken, static_cast<unsigned>(_countof(targetToken)), offsetToken, static_cast<unsigned>(_countof(offsetToken)));
-
-    if (wcslen(offsetToken) > 0) {
-        maxScanOffset = static_cast<ULONG>(wcstoul(offsetToken, nullptr, 16));
-        if (maxScanOffset == 0) maxScanOffset = 0x400;
-    }
-
-    // Try parsing hex address
-    wchar_t* endPtr = nullptr;
-    symbolAddress = wcstoull(targetToken, &endPtr, 16);
-
-    if (endPtr == targetToken || *endPtr != L'\0' || symbolAddress < 0x10000) {
-        symbolAddress = 0;
-        wchar_t moduleName[128] = { 0 };
-        wchar_t* bangPos = wcschr(targetToken, L'!');
-        if (bangPos) {
-            wcsncpy_s(moduleName, targetToken, bangPos - targetToken);
-            ULONG imageIndex = 0;
-            ULONG64 imageBase = 0;
-            if (SUCCEEDED(Symbols->GetModuleByModuleNameWide(moduleName, 0, &imageIndex, &imageBase))) {
-                DEBUG_MODULE_PARAMETERS modParams = { 0 };
-                Symbols->GetModuleParameters(1, nullptr, imageIndex, &modParams);
-                DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] Module: %s | Base: 0x%p | Size: 0x%lx\n",
-                    moduleName, reinterpret_cast<void*>(imageBase), modParams.Size);
-            }
+    // ── entropy mode ────────────────────────────────────────────────────────
+    if (_wcsicmp(tok0, L"entropy") == 0) {
+        if (wcslen(tok1) == 0) {
+            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan entropy <sym|addr> [size]\n");
+            hr = E_INVALIDARG; goto Exit;
         }
-
-        ULONG64 searchHandle = 0;
-        if (SUCCEEDED(Symbols->StartSymbolMatchWide(targetToken, &searchHandle))) {
-            Symbols->GetNextSymbolMatch(searchHandle, nullptr, 0, 0, &symbolAddress);
-            Symbols->EndSymbolMatch(searchHandle);
-        }
-    }
-
-    if (symbolAddress == 0) {
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Symbol or address '%s' not found!\n", targetToken);
+        ULONG window = (wcslen(tok2) > 0) ? static_cast<ULONG>(wcstoul(tok2, nullptr, 16)) : 0x200;
+        if (!window) window = 0x200;
+        hr = DoEntropyMap(ctrl, ds, tok1, sym, window);
         goto Exit;
     }
 
-    DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] Target Address: 0x%p (Scan Window: 0x%lx bytes)\n",
-        reinterpret_cast<void*>(symbolAddress), maxScanOffset);
-    DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] Performing High-Speed Bulk Memory Analysis...\n\n");
-
-    if (DataSpaces) {
-        std::vector<uint8_t> buffer(maxScanOffset);
-        ULONG bytesRead = 0;
-
-        if (FAILED(DataSpaces->ReadVirtual(symbolAddress, buffer.data(), maxScanOffset, &bytesRead)) || bytesRead == 0) {
-            DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Failed to read virtual memory at 0x%p\n", reinterpret_cast<void*>(symbolAddress));
-            goto Exit;
+    // ── list (cross-reference) mode ─────────────────────────────────────────
+    if (_wcsicmp(tok0, L"list") == 0) {
+        if (wcslen(tok1) == 0) {
+            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan list <sym|addr> [size]\n");
+            hr = E_INVALIDARG; goto Exit;
         }
+        ULONG window = (wcslen(tok2) > 0) ? static_cast<ULONG>(wcstoul(tok2, nullptr, 16)) : 0x400;
+        if (!window) window = 0x400;
+        hr = DoListCrossRef(ctrl, sym, ds, tok1, window);
+        goto Exit;
+    }
 
-        ULONG matchCount = 0;
-
-        for (ULONG offset = 0; offset + sizeof(uint64_t) <= bytesRead; offset += 8) {
-            if (DebugControl->GetInterrupt() == S_OK) {
-                DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n[*] Scan aborted by user Ctrl+C.\n");
-                break;
-            }
-
-            ULONG64 currentAddr = symbolAddress + offset;
-            const uint8_t* ptr = buffer.data() + offset;
-
-            // 1. Check UNICODE_STRING pattern
-            uint16_t uLen = *reinterpret_cast<const uint16_t*>(ptr);
-            uint16_t uMaxLen = *reinterpret_cast<const uint16_t*>(ptr + 2);
-            if (offset + 16 <= bytesRead) {
-                uint64_t uBufPtr = *reinterpret_cast<const uint64_t*>(ptr + 8);
-                if (uLen > 0 && uLen <= uMaxLen && uMaxLen <= 1024 && (uLen % 2 == 0) && uBufPtr > 0xFFFF000000000000ULL) {
-                    std::vector<wchar_t> wstr(uLen / 2 + 1, 0);
-                    ULONG uRead = 0;
-                    if (SUCCEEDED(DataSpaces->ReadVirtual(uBufPtr, wstr.data(), uLen, &uRead)) && uRead > 0) {
-                        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  +0x%04lx [0x%p] (UNICODE_STRING %u/%u B): %s\n",
-                            offset, reinterpret_cast<void*>(currentAddr), static_cast<unsigned int>(uLen), static_cast<unsigned int>(uMaxLen), wstr.data());
-                        matchCount++;
-                    }
-                }
-            }
-
-            // 2. Check ASCII String pattern inline
-            size_t asciiLen = 0;
-            while (offset + asciiLen < bytesRead && IsPrintableAscii(ptr[asciiLen])) {
-                asciiLen++;
-            }
-            if (asciiLen >= 4) {
-                std::wstring wstr(asciiLen, L'\0');
-                for (size_t i = 0; i < asciiLen; ++i) {
-                    wstr[i] = static_cast<wchar_t>(ptr[i]);
-                }
-                DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  +0x%04lx [0x%p] (ASCII String %u B): %s\n",
-                    offset, reinterpret_cast<void*>(currentAddr), static_cast<unsigned int>(asciiLen), wstr.c_str());
-                matchCount++;
-            }
-
-            // 3. Check Kernel Pointer & Symbol Name Resolution
-            uint64_t ptrVal = *reinterpret_cast<const uint64_t*>(ptr);
-            if (ptrVal > 0xFFFF000000000000ULL) {
-                wchar_t symName[256] = { 0 };
-                ULONG64 displacement = 0;
-                if (SUCCEEDED(Symbols->GetNameByOffsetWide(ptrVal, symName, _countof(symName), nullptr, &displacement))) {
-                    DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  +0x%04lx [0x%p] (Pointer): 0x%p -> %s+0x%llx\n",
-                        offset, reinterpret_cast<void*>(currentAddr), reinterpret_cast<void*>(ptrVal), symName, displacement);
-                    matchCount++;
-                }
-            }
-        }
-
-        DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n[+] Scan Complete: %u interesting fields identified.\n", static_cast<unsigned int>(matchCount));
+    // ── default: single scan ─────────────────────────────────────────────────
+    {
+        ULONG window = (wcslen(tok1) > 0) ? static_cast<ULONG>(wcstoul(tok1, nullptr, 16)) : 0x400;
+        if (!window) window = 0x400;
+        hr = DoSingleScan(ctrl, sym, ds, tok0, window);
     }
 
 Exit:
-    if (DataSpaces) DataSpaces->Release();
-    if (Symbols) Symbols->Release();
-    if (DebugControl) DebugControl->Release();
+    if (ds)   ds->Release();
+    if (sym)  sym->Release();
+    if (ctrl) ctrl->Release();
     return hr;
 }
