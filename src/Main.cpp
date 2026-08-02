@@ -14,7 +14,7 @@
 #include <iostream>
 
 #define EXTENSION_VERSION_MAJOR 2
-#define EXTENSION_VERSION_MINOR 3
+#define EXTENSION_VERSION_MINOR 4
 
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags) {
     if (Version) *Version = DEBUG_EXTENSION_VERSION(EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
@@ -48,11 +48,25 @@ __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In
         mbstowcs_s(&converted, wideArgs, _countof(wideArgs), Args, _TRUNCATE);
     }
 
-    // Support !structscan unload
+    // Support !structscan unload cleanly
     if (_wcsicmp(wideArgs, L"unload") == 0) {
         DebugControl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] Unloading structscan extension...\n");
-        DebugControl->ExecuteWide(DEBUG_OUTCTL_ALL_CLIENTS, L".unload structscan.dll", DEBUG_EXECUTE_DEFAULT);
-        DebugControl->ExecuteWide(DEBUG_OUTCTL_ALL_CLIENTS, L".unload structscan", DEBUG_EXECUTE_DEFAULT);
+        
+        // Execute unload command for all possible loaded aliases
+        const wchar_t* unloadCmds[] = {
+            L".unload structscan.dll",
+            L".unload structscan",
+            L".unload structscan_arm64.dll",
+            L".unload structscan_arm64",
+            L".unload structscan_x64.dll",
+            L".unload structscan_x64",
+            L".unload structscan_x86.dll",
+            L".unload structscan_x86"
+        };
+
+        for (size_t i = 0; i < _countof(unloadCmds); ++i) {
+            DebugControl->ExecuteWide(DEBUG_OUTCTL_ALL_CLIENTS, unloadCmds[i], DEBUG_EXECUTE_NOT_LOGGED);
+        }
         goto Exit;
     }
 
