@@ -28,11 +28,12 @@ HRESULT DoEmitHeader(
     analyzer.Symbols    = sym;
 
     std::vector<FieldAnalysis> fields;
-    for (ULONG off = 0; off + 8 <= rd; off += 8) {
+    for (ULONG off = 0; off + 8 <= rd; ) {
         auto fa = analyzer.Analyze(buf.data(), rd, off, addr);
         if (fa.type != FieldType::Unknown && fa.type != FieldType::Padding && fa.confidence > 0.25) {
             fields.push_back(fa);
         }
+        off += fa.size > 0 ? fa.size : 8;
     }
 
     std::wstring structName = L"RECONSTRUCTED_";
@@ -124,9 +125,7 @@ HRESULT DoEmitHeader(
             fa.offset, cType, fName.c_str(), comment.c_str());
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"%s", fieldLine);
 
-        ULONG size = 8;
-        if (fa.type == FieldType::UnicodeString || fa.type == FieldType::ListEntry) size = 16;
-        currentOffset = fa.offset + size;
+        currentOffset = fa.offset + fa.size;
     }
 
     if (currentOffset < rd) {

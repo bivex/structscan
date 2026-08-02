@@ -84,6 +84,7 @@ struct FieldAnalysis {
     std::wstring annotation;
     ULONG64      ptrTarget;
     bool         isListEntry;
+    ULONG        size;
 };
 
 struct OffsetProfile {

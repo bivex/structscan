@@ -53,7 +53,7 @@ HRESULT DoSingleScan(
     analyzer.Symbols    = sym;
 
     ULONG count = 0;
-    for (ULONG off = 0; off + 8 <= rd; off += 8) {
+    for (ULONG off = 0; off + 8 <= rd; ) {
         if (ctrl->GetInterrupt() == S_OK) {
             ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n[*] Aborted by user (Ctrl+C)\n");
             break;
@@ -63,6 +63,7 @@ HRESULT DoSingleScan(
             PrintField(ctrl, fa);
             count++;
         }
+        off += fa.size > 0 ? fa.size : 8;
     }
 
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,

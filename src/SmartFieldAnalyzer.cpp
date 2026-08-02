@@ -5,6 +5,20 @@
 
 #include "../include/structscan.h"
 #include <cwchar>
+#include <cmath>
+#include <map>
+#include <algorithm>
+
+// PAC stripping for ARM64 kernel pointers
+static uint64_t StripPAC(uint64_t val) {
+    // If bits 55-63 are modified by PAC, we sign-extend bit 54.
+    // Standard ARM64 kernel VA has bit 55 set to 1.
+    // A simple heuristic for kernel pointers:
+    if ((val & 0x0080000000000000ULL) != 0) {
+        return val | 0xFFFF000000000000ULL;
+    }
+    return val;
+}
 
 FieldAnalysis SmartFieldAnalyzer::Analyze(
     const uint8_t* buf, size_t bufSize,
@@ -16,19 +30,28 @@ FieldAnalysis SmartFieldAnalyzer::Analyze(
     result.address = baseAddr + offset;
     result.type    = FieldType::Unknown;
     result.confidence = 0.0;
+    result.size = 8; // Default size
 
-    if (offset + 8 > bufSize) return result;
+    if (offset + 8 > bufSize) {
+        result.size = bufSize - offset;
+        return result;
+    }
 
     const uint8_t* ptr = buf + offset;
-    result.rawValue = *reinterpret_cast<const uint64_t*>(ptr);
+    uint64_t raw64 = *reinterpret_cast<const uint64_t*>(ptr);
+    uint32_t raw32 = *reinterpret_cast<const uint32_t*>(ptr);
+    
+    result.rawValue = raw64;
     result.entropy  = ComputeEntropy(ptr, 8);
+    
+    uint64_t strippedPtr = StripPAC(raw64);
 
-    bool f_allZero      = (result.rawValue == 0);
-    bool f_kernelPtr    = (result.rawValue > 0xFFFF000000000000ULL);
+    bool f_allZero      = (raw64 == 0);
+    bool f_kernelPtr    = (strippedPtr >= 0xFFFF000000000000ULL && strippedPtr < 0xFFFFFFFFFFFFFFFFULL);
     bool f_lowEntropy   = (result.entropy  < 1.0);
     bool f_highEntropy  = (result.entropy  > 6.5);
-    bool f_smallInt     = (result.rawValue < 0x10000ULL && result.rawValue > 0);
-    bool f_aligned      = ((result.rawValue & 0x7) == 0);
+    bool f_smallInt     = (raw64 < 0x10000ULL && raw64 > 0);
+    bool f_aligned      = ((raw64 & 0x7) == 0);
     bool f_sparsePopcount = false;
     bool f_validPoolTag = false;
     bool f_resolvesSym  = false;
@@ -38,22 +61,21 @@ FieldAnalysis SmartFieldAnalyzer::Analyze(
     ULONG asciiLen      = 0;
 
     {
-        int pop = PopCount(result.rawValue);
+        int pop = PopCount(raw64);
         f_sparsePopcount = (pop >= 1 && pop <= 12 && !f_smallInt);
     }
 
     {
-        uint32_t tagVal = static_cast<uint32_t>(result.rawValue & 0xFFFFFFFF);
-        f_validPoolTag  = IsValidPoolTag(tagVal);
+        f_validPoolTag  = IsValidPoolTag(raw32);
     }
 
     wchar_t symName[256] = {};
     ULONG64 displacement = 0;
     if (f_kernelPtr && Symbols) {
-        if (SUCCEEDED(Symbols->GetNameByOffsetWide(result.rawValue, symName, _countof(symName), nullptr, &displacement))) {
+        if (SUCCEEDED(Symbols->GetNameByOffsetWide(strippedPtr, symName, _countof(symName), nullptr, &displacement))) {
             f_resolvesSym = true;
             result.annotation = symName;
-            result.ptrTarget  = result.rawValue;
+            result.ptrTarget  = strippedPtr;
             if (displacement > 0) {
                 result.annotation += L"+0x";
                 wchar_t dispBuf[32] = {};
@@ -63,13 +85,15 @@ FieldAnalysis SmartFieldAnalyzer::Analyze(
         }
     }
 
+    // LIST_ENTRY detection (Context-aware, 16 bytes)
     if (f_kernelPtr && DataSpaces && offset + 16 <= bufSize) {
-        uint64_t flinkVal  = result.rawValue;
-        uint64_t blinkVal  = *reinterpret_cast<const uint64_t*>(ptr + 8);
-        if (flinkVal > 0xFFFF000000000000ULL && blinkVal > 0xFFFF000000000000ULL) {
+        uint64_t flinkVal  = strippedPtr;
+        uint64_t blinkVal  = StripPAC(*reinterpret_cast<const uint64_t*>(ptr + 8));
+        if (flinkVal >= 0xFFFF000000000000ULL && blinkVal >= 0xFFFF000000000000ULL) {
             uint64_t flinkBlink = 0;
             ULONG rd = 0;
             if (SUCCEEDED(DataSpaces->ReadVirtual(flinkVal + 8, &flinkBlink, sizeof(uint64_t), &rd)) && rd == 8) {
+                flinkBlink = StripPAC(flinkBlink);
                 if (flinkBlink == result.address || flinkBlink == blinkVal) {
                     f_isListEntry = true;
                     result.isListEntry = true;
@@ -83,12 +107,13 @@ FieldAnalysis SmartFieldAnalyzer::Analyze(
         }
     }
 
+    // UNICODE_STRING detection (Context-aware, 16 bytes)
     if (offset + 16 <= bufSize) {
         uint16_t uLen    = *reinterpret_cast<const uint16_t*>(ptr);
         uint16_t uMaxLen = *reinterpret_cast<const uint16_t*>(ptr + 2);
-        uint64_t uBuf    = *reinterpret_cast<const uint64_t*>(ptr + 8);
+        uint64_t uBuf    = StripPAC(*reinterpret_cast<const uint64_t*>(ptr + 8));
         if (uLen > 0 && uLen <= uMaxLen && uMaxLen <= 1024 &&
-            (uLen % 2) == 0 && uBuf > 0xFFFF000000000000ULL && DataSpaces)
+            (uLen % 2) == 0 && uBuf >= 0xFFFF000000000000ULL && DataSpaces)
         {
             std::vector<wchar_t> wstr(uLen / 2 + 1, 0);
             ULONG uRead = 0;
@@ -117,61 +142,85 @@ FieldAnalysis SmartFieldAnalyzer::Analyze(
         }
     }
 
-    struct TypeScore { FieldType type; double score; };
-    std::array<TypeScore, 9> scores = {{
-        { FieldType::Padding,       0.0 },
-        { FieldType::ListEntry,     0.0 },
-        { FieldType::UnicodeString, 0.0 },
-        { FieldType::Pointer,       0.0 },
-        { FieldType::AsciiString,   0.0 },
-        { FieldType::PoolTag,       0.0 },
-        { FieldType::Handle,        0.0 },
-        { FieldType::Flags,         0.0 },
-        { FieldType::Integer,       0.0 },
-    }};
+    // Naive Bayes Probabilities P(Feature | Class)
+    // Classes: Padding, ListEntry, UnicodeString, Pointer, AsciiString, PoolTag, Handle, Flags, Integer
+    struct BayesClass {
+        FieldType type;
+        double prior;
+        double p_allZero, p_kernelPtr, p_lowEntropy, p_highEntropy, p_smallInt;
+        double p_sparsePop, p_validPoolTag, p_resolvesSym, p_isListEntry, p_isUnicodeStr, p_isAscii;
+        ULONG expectedSize;
+    };
 
-    auto& [t_Pad, t_List, t_Uni, t_Ptr, t_Asc, t_Tag, t_Hnd, t_Flg, t_Int] = scores;
+    BayesClass classes[] = {
+        { FieldType::Padding,       0.20, 0.95, 0.01, 0.90, 0.01, 0.05, 0.01, 0.01, 0.00, 0.00, 0.00, 0.01, 8 },
+        { FieldType::ListEntry,     0.05, 0.00, 0.99, 0.10, 0.80, 0.00, 0.10, 0.00, 0.80, 0.99, 0.00, 0.01, 16},
+        { FieldType::UnicodeString, 0.05, 0.00, 0.05, 0.10, 0.50, 0.10, 0.10, 0.01, 0.01, 0.00, 0.99, 0.01, 16},
+        { FieldType::Pointer,       0.30, 0.00, 0.99, 0.10, 0.80, 0.00, 0.10, 0.01, 0.80, 0.00, 0.00, 0.01, 8 },
+        { FieldType::AsciiString,   0.05, 0.00, 0.01, 0.10, 0.50, 0.01, 0.10, 0.01, 0.00, 0.00, 0.00, 0.99, 8 },
+        { FieldType::PoolTag,       0.05, 0.00, 0.01, 0.10, 0.50, 0.01, 0.10, 0.99, 0.00, 0.00, 0.00, 0.95, 4 },
+        { FieldType::Handle,        0.05, 0.00, 0.01, 0.80, 0.01, 0.60, 0.10, 0.01, 0.00, 0.00, 0.00, 0.01, 8 },
+        { FieldType::Flags,         0.10, 0.05, 0.01, 0.80, 0.10, 0.20, 0.90, 0.01, 0.00, 0.00, 0.00, 0.01, 4 },
+        { FieldType::Integer,       0.15, 0.01, 0.01, 0.50, 0.50, 0.50, 0.50, 0.01, 0.00, 0.00, 0.00, 0.01, 4 },
+    };
 
-    if (f_allZero)          { t_Pad.score  += 4.0; t_Int.score  -= 2.0; t_Ptr.score -= 3.0; }
-    if (f_lowEntropy)       { t_Pad.score  += 2.0; t_Asc.score  -= 1.0; }
-    if (f_isListEntry)      { t_List.score += 8.0; t_Ptr.score  -= 2.0; }
-    if (f_isUnicodeStr)     { t_Uni.score  += 8.0; t_Asc.score  -= 3.0; }
-    if (f_kernelPtr)        { t_Ptr.score  += 4.0; t_Int.score  -= 3.0; t_Tag.score -= 3.0; }
-    if (f_resolvesSym)      { t_Ptr.score  += 4.0; }
-    if (f_highEntropy && f_kernelPtr) { t_Ptr.score += 1.0; }
-    if (f_isAscii)          { t_Asc.score  += 3.0 + (asciiLen > 8 ? 2.0 : 0.0); }
-    if (f_isAscii && !f_kernelPtr) { t_Asc.score += 2.0; }
-    if (f_validPoolTag && !f_kernelPtr && !f_smallInt) { t_Tag.score += 4.0; }
-    if (f_aligned && f_smallInt) { t_Hnd.score += 1.5; }
-    if ((result.rawValue & 0xFFFFFFFF00000000ULL) == 0xFFFFFFFF00000000ULL) { t_Hnd.score += 2.0; }
-    if (f_sparsePopcount && !f_kernelPtr && !f_smallInt) { t_Flg.score += 2.0; }
-    if (f_smallInt)         { t_Int.score  += 3.0; t_Flg.score  -= 1.0; }
-    if (!f_kernelPtr && !f_isAscii && !f_isUnicodeStr && !f_validPoolTag && !f_isListEntry)
-                            { t_Int.score  += 0.5; }
+    double maxPosterior = -1.0;
+    FieldType bestType = FieldType::Unknown;
+    ULONG bestSize = 8;
+    double evidence = 0.0;
+    
+    std::vector<double> posteriors(9, 0.0);
 
-    auto winner = std::max_element(scores.begin(), scores.end(),
-        [](const TypeScore& a, const TypeScore& b) { return a.score < b.score; });
+    for (size_t i = 0; i < 9; i++) {
+        auto& c = classes[i];
+        double p = c.prior;
+        p *= f_allZero ? c.p_allZero : (1.0 - c.p_allZero);
+        p *= f_kernelPtr ? c.p_kernelPtr : (1.0 - c.p_kernelPtr);
+        p *= f_lowEntropy ? c.p_lowEntropy : (1.0 - c.p_lowEntropy);
+        p *= f_highEntropy ? c.p_highEntropy : (1.0 - c.p_highEntropy);
+        p *= f_smallInt ? c.p_smallInt : (1.0 - c.p_smallInt);
+        p *= f_sparsePopcount ? c.p_sparsePop : (1.0 - c.p_sparsePop);
+        p *= f_validPoolTag ? c.p_validPoolTag : (1.0 - c.p_validPoolTag);
+        p *= f_resolvesSym ? c.p_resolvesSym : (1.0 - c.p_resolvesSym);
+        p *= f_isListEntry ? c.p_isListEntry : (1.0 - c.p_isListEntry);
+        p *= f_isUnicodeStr ? c.p_isUnicodeStr : (1.0 - c.p_isUnicodeStr);
+        p *= f_isAscii ? c.p_isAscii : (1.0 - c.p_isAscii);
+        
+        posteriors[i] = p;
+        evidence += p;
+    }
 
-    double posSum = 0.0;
-    for (auto& s : scores) if (s.score > 0) posSum += s.score;
-    result.type       = (winner->score > 0.0) ? winner->type : FieldType::Unknown;
-    { double c = (posSum > 0) ? (winner->score / posSum) : 0.0; result.confidence = c < 1.0 ? c : 1.0; }
+    for (size_t i = 0; i < 9; i++) {
+        if (evidence > 0) posteriors[i] /= evidence;
+        if (posteriors[i] > maxPosterior) {
+            maxPosterior = posteriors[i];
+            bestType = classes[i].type;
+            bestSize = classes[i].expectedSize;
+        }
+    }
+
+    result.type = bestType;
+    result.confidence = maxPosterior;
+    result.size = bestSize;
+
+    if (f_isAscii && bestType == FieldType::AsciiString) {
+        result.size = (asciiLen + 7) & ~7; // align to 8
+    }
 
     if (result.annotation.empty()) {
         wchar_t buf[128] = {};
         switch (result.type) {
             case FieldType::PoolTag: {
-                uint32_t tagVal = static_cast<uint32_t>(result.rawValue & 0xFFFFFFFF);
-                auto* known = FindPoolTag(tagVal);
+                auto* known = FindPoolTag(raw32);
                 if (known) {
                     swprintf_s(buf, L"'%c%c%c%c' (%S)",
-                        (tagVal) & 0xFF, (tagVal >> 8) & 0xFF,
-                        (tagVal >> 16) & 0xFF, (tagVal >> 24) & 0xFF,
+                        (raw32) & 0xFF, (raw32 >> 8) & 0xFF,
+                        (raw32 >> 16) & 0xFF, (raw32 >> 24) & 0xFF,
                         known->description);
                 } else {
                     swprintf_s(buf, L"'%c%c%c%c'",
-                        (tagVal) & 0xFF, (tagVal >> 8) & 0xFF,
-                        (tagVal >> 16) & 0xFF, (tagVal >> 24) & 0xFF);
+                        (raw32) & 0xFF, (raw32 >> 8) & 0xFF,
+                        (raw32 >> 16) & 0xFF, (raw32 >> 24) & 0xFF);
                 }
                 result.annotation = buf;
                 break;
