@@ -13,6 +13,7 @@
 #ifndef STRUCTSCAN_H
 #define STRUCTSCAN_H
 
+#define NOMINMAX   // Prevent Windows.h from defining min/max macros
 #define INITGUID
 #include <windows.h>
 #include <dbgeng.h>
@@ -368,7 +369,7 @@ public:
         double posSum = 0.0;
         for (auto& s : scores) if (s.score > 0) posSum += s.score;
         result.type       = (winner->score > 0.0) ? winner->type : FieldType::Unknown;
-        result.confidence = (posSum > 0) ? std::min(1.0, winner->score / posSum) : 0.0;
+        { double c = (posSum > 0) ? (winner->score / posSum) : 0.0; result.confidence = c < 1.0 ? c : 1.0; }
 
         // Annotate non-pointer types if no annotation yet
         if (result.annotation.empty()) {
@@ -392,7 +393,8 @@ public:
                 }
                 case FieldType::AsciiString: {
                     std::wstring ws;
-                    for (ULONG i = 0; i < std::min(asciiLen, (ULONG)64); i++)
+                    ULONG asciiCap = asciiLen < 64u ? asciiLen : 64u;
+                    for (ULONG i = 0; i < asciiCap; i++)
                         ws += static_cast<wchar_t>(ptr[i]);
                     result.annotation = ws;
                     break;
