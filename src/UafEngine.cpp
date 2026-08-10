@@ -254,34 +254,51 @@ static ContentAnalysis AnalyzeContent(IDebugDataSpaces4* ds, ULONG64 addr, ULONG
 // Phase 4 — Dangling Reference Scan
 // ─────────────────────────────────────────────────────────────────────────────
 
+struct DanglingRef {
+    ULONG64 refAddr;   // Where the pointer was found
+    ULONG64 targetVal; // Actual pointer value (targetAddr + offset)
+    ULONG   offset;    // Offset into object (0x00 for base address)
+};
+
 /**
- * Scans [scanStart, scanStart+scanBytes) in 4KB chunks looking for any
- * 8-byte aligned value equal to targetAddr. Returns addresses of all matches.
- * Caps at kMaxDanglingRefs to avoid long output.
+ * Scans [scanStart, scanStart+scanBytes) in 64KB chunks looking for any
+ * 8-byte aligned pointer in range [targetAddr, targetAddr + objSize).
+ * Catches both base-address pointers and internal-offset pointers (e.g. LIST_ENTRY).
  */
-static std::vector<ULONG64> ScanDanglingRefs(
+static std::vector<DanglingRef> ScanDanglingRefs(
     IDebugControl4*    ctrl,
     IDebugDataSpaces4* ds,
     ULONG64            targetAddr,
+    ULONG              objSize,
     ULONG64            scanStart,
     ULONG              scanBytes
 ) {
-    std::vector<ULONG64> refs;
-    constexpr ULONG kChunk = 0x1000;
-    uint8_t chunk[kChunk] = {};
+    std::vector<DanglingRef> refs;
+    constexpr ULONG kChunk = 0x10000; // 64 KB chunk for high throughput
+    std::vector<uint8_t> chunkBuf(kChunk);
+
+    const ULONG64 objEnd = targetAddr + ((objSize > 0) ? objSize : 1);
 
     for (ULONG64 pos = scanStart; pos < scanStart + scanBytes; pos += kChunk) {
-        // Respect Ctrl+C
+        // Respect Ctrl+C interrupt from user
         if (ctrl->GetInterrupt() == S_OK) break;
 
         ULONG rd = 0;
-        if (FAILED(ds->ReadVirtual(pos, chunk, kChunk, &rd)) || rd < 8)
-            continue; // page not resident — skip
+        ULONG readSize = static_cast<ULONG>(std::min<ULONG64>(kChunk, (scanStart + scanBytes) - pos));
+        if (FAILED(ds->ReadVirtual(pos, chunkBuf.data(), readSize, &rd)) || rd < 8)
+            continue; // Page not resident — skip
 
-        for (ULONG i = 0; i + 8 <= rd; i += 8) {
-            uint64_t v = *reinterpret_cast<const uint64_t*>(chunk + i);
-            if (v == targetAddr) {
-                refs.push_back(pos + i);
+        const uint64_t* ptrs = reinterpret_cast<const uint64_t*>(chunkBuf.data());
+        const size_t count = rd / 8;
+
+        for (size_t i = 0; i < count; i++) {
+            uint64_t v = ptrs[i];
+            if (v >= targetAddr && v < objEnd) {
+                DanglingRef dr{};
+                dr.refAddr   = pos + (i * 8);
+                dr.targetVal = v;
+                dr.offset    = static_cast<ULONG>(v - targetAddr);
+                refs.push_back(dr);
                 if (refs.size() >= kMaxDanglingRefs) return refs;
             }
         }
@@ -536,13 +553,14 @@ HRESULT DoUafAnalysis(
 
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"  Scanning 0x%016llx .. 0x%016llx\n"
-        L"  Looking for 8-byte aligned pointers == 0x%016llx\n"
+        L"  Looking for 8-byte aligned pointers in range [0x%016llx .. 0x%016llx)\n"
         L"  (Ctrl+C aborts scan early)\n\n",
         static_cast<unsigned long long>(scanStart),
         static_cast<unsigned long long>(scanStart + searchBytes),
-        static_cast<unsigned long long>(addr));
+        static_cast<unsigned long long>(addr),
+        static_cast<unsigned long long>(addr + objSize));
 
-    auto refs = ScanDanglingRefs(ctrl, ds, addr, scanStart, searchBytes);
+    auto refs = ScanDanglingRefs(ctrl, ds, addr, objSize, scanStart, searchBytes);
 
     if (refs.empty()) {
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
@@ -558,13 +576,13 @@ HRESULT DoUafAnalysis(
             static_cast<unsigned long long>(addr));
 
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  Ref Address           Symbol\n"
-            L"  --------------------  --------------------------------------------------\n");
+            L"  Ref Address           Target Offset   Symbol / Context\n"
+            L"  --------------------  --------------  --------------------------------------------------\n");
 
-        for (ULONG64 refAddr : refs) {
+        for (const auto& ref : refs) {
             wchar_t sn[256] = {}; ULONG64 sd = 0;
             std::wstring label;
-            if (SUCCEEDED(sym->GetNameByOffsetWide(refAddr, sn, _countof(sn), nullptr, &sd))) {
+            if (SUCCEEDED(sym->GetNameByOffsetWide(ref.refAddr, sn, _countof(sn), nullptr, &sd))) {
                 label = sn;
                 if (sd > 0) {
                     wchar_t db[32] = {};
@@ -574,9 +592,18 @@ HRESULT DoUafAnalysis(
             } else {
                 label = L"<no symbol>";
             }
+
+            wchar_t offStr[32] = {};
+            if (ref.offset == 0) {
+                swprintf_s(offStr, L"+0x00 (Base)");
+            } else {
+                swprintf_s(offStr, L"+0x%02x", ref.offset);
+            }
+
             ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  0x%016llx    %s\n",
-                static_cast<unsigned long long>(refAddr),
+                L"  0x%016llx    %-14s  %s\n",
+                static_cast<unsigned long long>(ref.refAddr),
+                offStr,
                 label.c_str());
         }
 
