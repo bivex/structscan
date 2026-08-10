@@ -141,18 +141,25 @@ static PoolAnalysis AnalyzePoolHeader(IDebugDataSpaces4* ds, ULONG64 objAddr) {
                                   (w0 != objAddr) && (w8 != objAddr) &&
                                   (w0 != w8);
 
-    pa.suspectFree = (pa.poolType == 0)    // PoolType=0 typical of freed chunk
-                  || (!pa.tagPrintable)    // corrupted tag
-                  || firstWordsAreFreeLinks;
+    // Known free tag markers: 'Free', 'Frag', 'Zero'
+    bool isKnownFreeTag = (hdr.PoolTag == 0x65657246 /* 'Free' */ ||
+                           hdr.PoolTag == 0x67617246 /* 'Frag' */ ||
+                           hdr.PoolTag == 0x6F65725A /* 'Zero' */);
+
+    // A chunk is ONLY marked suspectFree if payload has freelist pointers
+    // or if a valid pool tag explicitly indicates a free/fragmented chunk.
+    // Non-printable tag alone at objAddr - 0x10 simply means no standard POOL_HEADER
+    // at offset -0x10 (e.g. Big Pool, Segment Heap, or optional OBJECT_HEADER).
+    pa.suspectFree = firstWordsAreFreeLinks || (pa.tagPrintable && isKnownFreeTag);
 
     return pa;
 }
 
 static const wchar_t* PoolTypeName(uint32_t pt) {
     switch (pt) {
-        case 0:    return L"0 (NonPaged/FREE candidate)";
+        case 0:    return L"0 (NonPagedPool)";
         case 1:    return L"1 (PagedPool)";
-        case 2:    return L"2 (NonPagedPool)";
+        case 2:    return L"2 (NonPagedPoolMustSucceed)";
         case 3:    return L"3 (PagedPool Session)";
         case 0x20: return L"0x20 (NonPagedPoolNx)";
         case 0x21: return L"0x21 (PagedPoolNx)";
@@ -193,9 +200,7 @@ static ObjHdrAnalysis AnalyzeObjectHeader(IDebugDataSpaces4* ds, ULONG64 objAddr
 
     // PointerCount <= 0 means object was fully dereferenced (freed path).
     // HandleCount < 0 is the encoded "closed" state in some object managers.
-    // Impossibly large PointerCount is a sign of memory corruption.
     oa.refCountsSuspect = (oa.pointerCount <= 0)
-                       || (oa.pointerCount > 0x10000LL)
                        || (oa.handleCount  < 0);
 
     return oa;
@@ -385,14 +390,7 @@ HRESULT DoUafAnalysis(
 
         if (pool.suspectFree) {
             ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  [!] Pool header suggests FREED state:\n");
-            if (pool.poolType == 0)
-                ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                    L"      - PoolType=0 (classic free indicator)\n");
-            if (!pool.tagPrintable)
-                ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                    L"      - Pool tag has non-printable bytes (tag corruption)\n");
-            // Check if first words look like free-list links (re-read for message clarity)
+                L"  [!] Pool header/payload suggests FREED state:\n");
             {
                 uint64_t w0 = 0, w8 = 0; ULONG rd2 = 0;
                 ds->ReadVirtual(addr,     &w0, 8, &rd2);
@@ -407,9 +405,12 @@ HRESULT DoUafAnalysis(
             }
             riskScore    += 40;
             evidenceItems++;
-        } else {
+        } else if (pool.tagPrintable) {
             ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
                 L"  [+] Pool header consistent with LIVE allocation\n");
+        } else {
+            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"  [*] No standard POOL_HEADER at -0x10 (BigPool / SegmentHeap / Optional OBJECT_HEADER)\n");
         }
     }
 
@@ -429,8 +430,7 @@ HRESULT DoUafAnalysis(
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"  PointerCnt : %lld%s\n",
             static_cast<long long>(oh.pointerCount),
-            oh.pointerCount <= 0 ? L"  [!] <= 0 (FREED/fully dereferenced)" :
-            oh.pointerCount > 0x10000LL ? L"  [!] implausibly large (corruption?)" : L"");
+            oh.pointerCount <= 0 ? L"  [!] <= 0 (FREED/fully dereferenced)" : L"");
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"  HandleCnt  : %lld%s\n",
             static_cast<long long>(oh.handleCount),
@@ -444,10 +444,16 @@ HRESULT DoUafAnalysis(
                 L"  [!] Reference counts are SUSPECT — object may be freed/corrupted\n");
             riskScore    += 30;
             evidenceItems++;
+        } else if (oh.pointerCount > 0 && oh.handleCount >= 0 && oh.typeIndex > 0) {
+            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"  [+] Reference counts indicate LIVE Object (PointerCount=%lld, HandleCount=%lld)\n",
+                static_cast<long long>(oh.pointerCount),
+                static_cast<long long>(oh.handleCount));
+            // Strong counter-evidence for live objects: reduce risk score
+            riskScore = (std::max)(0, riskScore - 25);
         } else {
             ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
                 L"  [+] Reference counts look LIVE (PointerCount > 0)\n");
-            // Counter-evidence: reduce risk score slightly
             riskScore = (std::max)(0, riskScore - 10);
         }
     }
@@ -574,20 +580,18 @@ HRESULT DoUafAnalysis(
                 label.c_str());
         }
 
-        // If pool state already suggests freed + we have back-refs -> strong UAF signal
-        if (pool.readable && pool.suspectFree) {
+        // If pool state already suggests freed OR object header ref counts are suspect
+        if (pool.suspectFree || oh.refCountsSuspect) {
             ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
                 L"\n  [!!] FREED object with %llu dangling pointer(s) -- STRONG UAF SIGNAL\n",
                 static_cast<unsigned long long>(refs.size()));
             riskScore    += 50;
             evidenceItems += 2;
         } else {
-            // Ambiguous: may still be live but referenced from unusual places
+            // Live object referenced from nearby structures
             ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"\n  [!] Back-references present. "
-                L"If object is freed these are dangling pointers.\n");
-            riskScore    += 15;
-            evidenceItems++;
+                L"\n  [+] Object has %llu active reference(s) from nearby kernel structures.\n",
+                static_cast<unsigned long long>(refs.size()));
         }
     }
 
