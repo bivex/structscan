@@ -85,6 +85,7 @@
     <ClCompile Include="src\ListCrossRefEngine.cpp" />
     <ClCompile Include="src\HeaderSynthesizer.cpp" />
     <ClCompile Include="src\EntropyEngine.cpp" />
+    <ClCompile Include="src\UafEngine.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\structscan.h" />

@@ -46,6 +46,81 @@
 [+] Run: .unload structscan
 ```
 
+#### 🔹 Режим 5: Анализ Use-After-Free (`!uaf`)
+Многофазный анализ lifetime объекта ядра для обнаружения использования после освобождения.
+
+**Формальная модель:**
+```
+ALLOC(O) → LIVE(O) → FREE(O) → [REUSE(O)] → USE(O)
+                                     ↑
+                     Нарушение: USE(O) ⇒ LIVE(O) должен выполняться
+```
+
+**Синтаксис:**
+```text
+!uaf <sym|addr> [objsize] [searchbytes]
+```
+
+**Параметры:**
+- `sym|addr`    — символьное имя или hex-адрес подозреваемого объекта
+- `objsize`     — размер объекта в байтах (по умолчанию: `0x200`)
+- `searchbytes` — диапазон VA для поиска dangling-указателей (по умолчанию: `0x8000`)
+
+**Примеры:**
+```text
+0: kd> !uaf nt!PsInitialSystemProcess 0x480
+0: kd> !uaf ffff8001`234abcd0 0x300 0x20000
+0: kd> !uaf win32k!gpdi
+```
+
+**Пять фаз анализа:**
+
+| Фаза | Название | Что проверяет |
+|------|----------|---------------|
+| 1 | Pool Header | PoolType, валидность тега, наличие Flink/Blink free-list линковки |
+| 2 | OBJECT_HEADER | `PointerCount` / `HandleCount` — признаки деструкции объекта |
+| 3 | Content | Энтропия Шеннона + байесовский снимок полей (нулевые регионы = red flag) |
+| 4 | Dangling Refs | Обратный скан виртуальных адресов в поиске указателей на объект |
+| 5 | Risk Report | Взвешенная оценка 0–100 + готовый рецепт `ba r8 / ba w8` для WinDbg |
+
+**Пример вывода при обнаружении UAF:**
+```text
+================================================================
+  StructScan !uaf v4.0  --  Object Lifetime Analyzer
+================================================================
+
+  Address  : 0xffff8001234abcd0
+  ObjSize  : 0x300 bytes
+
+[=== PHASE 1 · Pool Header Analysis  (object - 0x10) ===]
+  PoolTag    : 'Driv' -> DRIVER_OBJECT (Driver)
+  PoolType   : 0 (NonPaged/FREE candidate)
+  [!] Pool header suggests FREED state:
+      - PoolType=0 (classic free indicator)
+      - Object[+0]  = 0xffff8001`deadbeef  (free-list Flink?)
+      - Object[+8]  = 0xffff8001`cafecafe  (free-list Blink?)
+
+[=== PHASE 4 · Dangling Reference Scan ===]
+  [!!] FREED object with 2 dangling pointer(s) -- STRONG UAF SIGNAL
+
+[=== PHASE 5 -- UAF Risk Report ===]
+
+  State   : FREED
+  Score   : 90 / 100
+  Risk    : [########################################] 90%
+
+  [!!!] HIGH RISK -- LIKELY USE-AFTER-FREE
+
+  WinDbg Breakpoint Recipe:
+    ba r8 0xffff8001234abcd0   <- break on any READ of freed object
+    ba w8 0xffff8001234abcd0   <- break on re-use/overwrite by allocator
+
+  Formal model at this address:
+    t_free < t_use  =>  UAF(O) proven
+    Lifetime(O) = [t_alloc, t_free)
+    t_use NOT IN Lifetime(O)  =>  USE-AFTER-FREE
+```
+
 ---
 
 ## 📊 Пример Сгенерированного C/C++ Заголовка (`!structscan emit`)
@@ -129,17 +204,52 @@ structscan/
 
 ---
 
-## 🔨 Сборка из Исходников (MSVC / CMake)
+## 🔨 Сборка из Исходников
 
-### Мультиархитектурная сборка MSVC:
+### ✅ Рекомендуемый способ: `build.bat` (Ninja + CMake, мультиарх)
+
 ```cmd
-call "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsall.bat" arm64
-cl.exe /std:c++17 /O2 /EHsc /MD /LD /Iinclude src\Main.cpp /link dbgeng.lib dbghelp.lib /OUT:bin\structscan_arm64.dll
+:: Обе архитектуры (x64 + ARM64) — Release
+build.bat
+
+:: Только x64
+build.bat x64
+
+:: Только ARM64
+build.bat arm64
+
+:: Удалить build\ директории
+build.bat clean
 ```
 
-### CMake:
+**Что делает `build.bat`:**
+1. Автоматически находит VS 2026 Insiders / VS 2022 (Enterprise → Professional → Community)
+2. Ищет `cmake.exe` и `ninja.exe` в PATH, затем в директории VS
+3. Вызывает `vcvarsall.bat` с нужной архитектурой
+4. Конфигурирует отдельные build-деревья (`build\x64\`, `build\arm64\`) через CMake + Ninja
+5. Копирует результат в `bin\structscan_x64.dll` / `bin\structscan_arm64.dll`
+
+**Требования:**
+- Visual Studio 2022 / 2026 с компонентом **"MSVC ARM64 Build Tools"**
+- CMake ≥ 3.15 (в PATH или в VS)
+- Ninja ≥ 1.11 (в PATH или в VS — `Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja`)
+
+---
+
+### Ручная сборка MSVC (одна архитектура):
+
+```cmd
+call "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsall.bat" arm64
+cl.exe /std:c++17 /O2 /EHsc /MD /LD /Iinclude ^
+    src\Main.cpp src\Utils.cpp src\SmartFieldAnalyzer.cpp ^
+    src\ScanEngine.cpp src\ListCrossRefEngine.cpp ^
+    src\HeaderSynthesizer.cpp src\EntropyEngine.cpp src\UafEngine.cpp ^
+    /link dbgeng.lib dbghelp.lib /OUT:bin\structscan_arm64.dll
+```
+
+### CMake вручную:
+
 ```bash
-mkdir build && cd build
-cmake ..
-cmake --build . --config Release
+cmake -S . -B build/x64 -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/x64 -- -j8
 ```

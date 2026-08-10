@@ -30,6 +30,7 @@ extern "C" {
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags);
 __declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void);
 __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
+__declspec(dllexport) HRESULT CALLBACK uaf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 
 #ifdef __cplusplus
 }
@@ -332,6 +333,15 @@ HRESULT DoEntropyMap(
     const wchar_t*     target,
     IDebugSymbols4*    sym,
     ULONG              scanWindow
+);
+
+HRESULT DoUafAnalysis(
+    IDebugControl4*    ctrl,
+    IDebugSymbols4*    sym,
+    IDebugDataSpaces4* ds,
+    const wchar_t*     target,
+    ULONG              objSize,
+    ULONG              searchBytes
 );
 
 #endif // STRUCTSCAN_H
