@@ -116,12 +116,16 @@ HRESULT DoEmitHeader(
             fName = fn;
         }
 
+        if (fa.type == FieldType::AsciiString) {
+            fName += L"[" + std::to_wstring(fa.size > 0 ? fa.size : 8) + L"]";
+        }
+
         std::wstring comment;
         if (!fa.annotation.empty()) {
             comment = L" // " + fa.annotation;
         }
 
-        swprintf_s(fieldLine, L"    /* +0x%04lx */ %s %-24s%s\n",
+        swprintf_s(fieldLine, L"    /* +0x%04lx */ %s %-24s;%s\n",
             fa.offset, cType, fName.c_str(), comment.c_str());
         ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"%s", fieldLine);
 

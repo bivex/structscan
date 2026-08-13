@@ -130,56 +130,56 @@ ALLOC(O) → LIVE(O) → FREE(O) → [REUSE(O)] → USE(O)
 // Target: nt!KdDebuggerDataBlock (0x00000000ac600f00) | Scan Window: 0x400 bytes
 
 typedef struct _RECONSTRUCTED_nt_KdDebuggerDataBlock {
-    /* +0x0000 */ LIST_ENTRY        Field_0000               // Flink=0xfffff802ac7ca420 Blink=0xfffff802ac7ca420
-    /* +0x0008 */ PVOID             KdpDebuggerDataListHead  // nt!KdpDebuggerDataListHead
-    /* +0x0010 */ char              Field_0010               // KDBG
-    /* +0x0018 */ PVOID             _guard_eh_cont_table     // nt!_guard_eh_cont_table <PERF> (nt+0x0)
-    /* +0x0020 */ PVOID             DbgBreakPoint            // nt!DbgBreakPoint
+    /* +0x0000 */ LIST_ENTRY        Field_0000;              // Flink=0xfffff802ac7ca420 Blink=0xfffff802ac7ca420
+    /* +0x0008 */ PVOID             KdpDebuggerDataListHead; // nt!KdpDebuggerDataListHead
+    /* +0x0010 */ char              Field_0010[8];           // KDBG
+    /* +0x0018 */ PVOID             _guard_eh_cont_table;    // nt!_guard_eh_cont_table <PERF> (nt+0x0)
+    /* +0x0020 */ PVOID             DbgBreakPoint;           // nt!DbgBreakPoint
     /* +0x0028 */ uint8_t           Padding_0028[16];
-    /* +0x0038 */ PVOID             KiCallUserMode           // nt!KiCallUserMode
+    /* +0x0038 */ PVOID             KiCallUserMode;          // nt!KiCallUserMode
     /* +0x0040 */ uint8_t           Padding_0040[8];
-    /* +0x0048 */ PVOID             PsLoadedModuleList       // nt!PsLoadedModuleList
-    /* +0x0050 */ PVOID             PsActiveProcessHead      // nt!PsActiveProcessHead
-    /* +0x0058 */ PVOID             PspCidTable              // nt!PspCidTable
-    /* +0x0060 */ PVOID             ExpSystemResourcesList   // nt!ExpSystemResourcesList
+    /* +0x0048 */ PVOID             PsLoadedModuleList;      // nt!PsLoadedModuleList
+    /* +0x0050 */ PVOID             PsActiveProcessHead;     // nt!PsActiveProcessHead
+    /* +0x0058 */ PVOID             PspCidTable;             // nt!PspCidTable
+    /* +0x0060 */ PVOID             ExpSystemResourcesList;  // nt!ExpSystemResourcesList
     /* +0x0068 */ uint8_t           Padding_0068[16];
-    /* +0x0078 */ PVOID             KeTimeIncrement          // nt!KeTimeIncrement
-    /* +0x0080 */ PVOID             KeBugCheckCallbackListHead // nt!KeBugCheckCallbackListHead
-    /* +0x0088 */ PVOID             KiBugCheckData           // nt!KiBugCheckData
-    /* +0x0090 */ PVOID             IopErrorLogListHead      // nt!IopErrorLogListHead
-    /* +0x0098 */ PVOID             ObpRootDirectoryObject   // nt!ObpRootDirectoryObject
-    /* +0x00a0 */ PVOID             ObpTypeObjectType        // nt!ObpTypeObjectType
+    /* +0x0078 */ PVOID             KeTimeIncrement;         // nt!KeTimeIncrement
+    /* +0x0080 */ PVOID             KeBugCheckCallbackListHead; // nt!KeBugCheckCallbackListHead
+    /* +0x0088 */ PVOID             KiBugCheckData;          // nt!KiBugCheckData
+    /* +0x0090 */ PVOID             IopErrorLogListHead;     // nt!IopErrorLogListHead
+    /* +0x0098 */ PVOID             ObpRootDirectoryObject;  // nt!ObpRootDirectoryObject
+    /* +0x00a0 */ PVOID             ObpTypeObjectType;       // nt!ObpTypeObjectType
     /* +0x00a8 */ uint8_t           Padding_00a8[24];
-    /* +0x00c0 */ PVOID             MmPfnDatabase            // nt!MmPfnDatabase
+    /* +0x00c0 */ PVOID             MmPfnDatabase;           // nt!MmPfnDatabase
     /* +0x00c8 */ uint8_t           Padding_00c8[112];
-    /* +0x0138 */ uint64_t          Field_0138               // 0x1000 (4096)
-    /* +0x0140 */ PVOID             MmSizeOfPagedPoolInBytes // nt!MmSizeOfPagedPoolInBytes
+    /* +0x0138 */ uint64_t          Field_0138;              // 0x1000 (4096)
+    /* +0x0140 */ PVOID             MmSizeOfPagedPoolInBytes; // nt!MmSizeOfPagedPoolInBytes
     /* +0x0148 */ uint8_t           Padding_0148[40];
-    /* +0x0170 */ PVOID             MiState                  // nt!MiState+0xb810
+    /* +0x0170 */ PVOID             MiState;                 // nt!MiState+0xb810
     /* +0x0178 */ uint8_t           Padding_0178[64];
-    /* +0x01b8 */ PVOID             PoolTrackTable           // nt!PoolTrackTable
+    /* +0x01b8 */ PVOID             PoolTrackTable;          // nt!PoolTrackTable
     /* +0x01c0 */ uint8_t           Padding_01c0[8];
-    /* +0x01c8 */ PVOID             MmHighestUserAddress     // nt!MmHighestUserAddress
-    /* +0x01d0 */ PVOID             MmSystemRangeStart       // nt!MmSystemRangeStart
-    /* +0x01d8 */ PVOID             MmUserProbeAddress       // nt!MmUserProbeAddress
-    /* +0x01e0 */ PVOID             KdPrintDefaultCircularBuffer // nt!KdPrintDefaultCircularBuffer
-    /* +0x01e8 */ PVOID             KdPrintRolloverCount     // nt!KdPrintRolloverCount
-    /* +0x01f0 */ PVOID             KdPrintWritePointer      // nt!KdPrintWritePointer
-    /* +0x01f8 */ PVOID             KdPrintRolloverCount     // nt!KdPrintRolloverCount
+    /* +0x01c8 */ PVOID             MmHighestUserAddress;    // nt!MmHighestUserAddress
+    /* +0x01d0 */ PVOID             MmSystemRangeStart;      // nt!MmSystemRangeStart
+    /* +0x01d8 */ PVOID             MmUserProbeAddress;      // nt!MmUserProbeAddress
+    /* +0x01e0 */ PVOID             KdPrintDefaultCircularBuffer; // nt!KdPrintDefaultCircularBuffer
+    /* +0x01e8 */ PVOID             KdPrintRolloverCount;    // nt!KdPrintRolloverCount
+    /* +0x01f0 */ PVOID             KdPrintWritePointer;     // nt!KdPrintWritePointer
+    /* +0x01f8 */ PVOID             KdPrintRolloverCount;    // nt!KdPrintRolloverCount
     /* +0x0200 */ uint8_t           Padding_0200[8];
-    /* +0x0208 */ PVOID             NtBuildLabEx             // nt!NtBuildLabEx
+    /* +0x0208 */ PVOID             NtBuildLabEx;            // nt!NtBuildLabEx
     /* +0x0210 */ uint8_t           Padding_0210[8];
-    /* +0x0218 */ PVOID             KiProcessorBlock         // nt!KiProcessorBlock
-    /* +0x0220 */ PVOID             MmUnloadedDrivers        // nt!MmUnloadedDrivers
-    /* +0x0228 */ PVOID             MmLastUnloadedDriver     // nt!MmLastUnloadedDriver
-    /* +0x0230 */ PVOID             VerifierTriageActionTaken // nt!VerifierTriageActionTaken
-    /* +0x0238 */ PVOID             MmSpecialPoolTag         // nt!MmSpecialPoolTag
-    /* +0x0240 */ PVOID             KernelVerifier           // nt!KernelVerifier
-    /* +0x0248 */ PVOID             MmVerifierData           // nt!MmVerifierData
+    /* +0x0218 */ PVOID             KiProcessorBlock;        // nt!KiProcessorBlock
+    /* +0x0220 */ PVOID             MmUnloadedDrivers;       // nt!MmUnloadedDrivers
+    /* +0x0228 */ PVOID             MmLastUnloadedDriver;    // nt!MmLastUnloadedDriver
+    /* +0x0230 */ PVOID             VerifierTriageActionTaken; // nt!VerifierTriageActionTaken
+    /* +0x0238 */ PVOID             MmSpecialPoolTag;        // nt!MmSpecialPoolTag
+    /* +0x0240 */ PVOID             KernelVerifier;          // nt!KernelVerifier
+    /* +0x0248 */ PVOID             MmVerifierData;          // nt!MmVerifierData
     /* +0x0250 */ uint8_t           Padding_0250[24];
-    /* +0x0268 */ PVOID             CmNtCSDVersion           // nt!CmNtCSDVersion
-    /* +0x0270 */ PVOID             MmPhysicalMemoryBlock    // nt!MmPhysicalMemoryBlock
-    /* +0x0390 */ PVOID             KePointerAuthMask        // nt!KePointerAuthMask
+    /* +0x0268 */ PVOID             CmNtCSDVersion;          // nt!CmNtCSDVersion
+    /* +0x0270 */ PVOID             MmPhysicalMemoryBlock;   // nt!MmPhysicalMemoryBlock
+    /* +0x0390 */ PVOID             KePointerAuthMask;       // nt!KePointerAuthMask
 } RECONSTRUCTED_nt_KdDebuggerDataBlock, *PRECONSTRUCTED_nt_KdDebuggerDataBlock;
 ```
 
