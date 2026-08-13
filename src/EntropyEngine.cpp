@@ -34,22 +34,23 @@ HRESULT DoEntropyMap(
 
     for (ULONG off = 0; off + 16 <= rd; off += 16) {
         double H = SmartFieldAnalyzer::ComputeEntropy(buf.data() + off, 16);
-        int barW = static_cast<int>(H / 8.0 * 24 + 0.5);
+        int barW = static_cast<int>(H / 4.0 * 24 + 0.5); // Max entropy for 16 bytes is log2(16) = 4.0 bits
+        if (barW > 24) barW = 24;
 
         std::wstring bar;
         bar.reserve(24);
         for (int i = 0; i < 24; i++) {
             if (i < barW)
-                bar += (H > 6.5) ? L'#' : (H > 3.5) ? L'*' : (H > 1.5) ? L'+' : L'.';
+                bar += (H >= 3.5) ? L'#' : (H >= 2.2) ? L'*' : (H >= 1.0) ? L'+' : L'.';
             else
                 bar += L' ';
         }
 
         const wchar_t* note = L"";
         if (H < 0.5)        note = L"<- Zero/Padding";
-        else if (H < 2.0)   note = L"<- Counter/Flag";
-        else if (H < 4.0)   note = L"<- String/Tag";
-        else if (H > 7.0)   note = L"<- Pointer/Crypto";
+        else if (H < 1.8)   note = L"<- Counter/Flag";
+        else if (H < 3.2)   note = L"<- String/Tag";
+        else                note = L"<- Pointer/Crypto";
 
         wchar_t line[256] = {};
         swprintf_s(line, L"  +0x%04lx   %5.2f    %s  %s\n",

@@ -48,8 +48,8 @@ FieldAnalysis SmartFieldAnalyzer::Analyze(
 
     bool f_allZero      = (raw64 == 0);
     bool f_kernelPtr    = (strippedPtr >= 0xFFFF000000000000ULL && strippedPtr < 0xFFFFFFFFFFFFFFFFULL);
-    bool f_lowEntropy   = (result.entropy  < 1.0);
-    bool f_highEntropy  = (result.entropy  > 6.5);
+    bool f_lowEntropy   = (result.entropy  < 0.6);
+    bool f_highEntropy  = (result.entropy  > 2.5); // Max possible entropy for 8 bytes is log2(8) = 3.0 bits
     bool f_smallInt     = (raw64 < 0x10000ULL && raw64 > 0);
     bool f_aligned      = ((raw64 & 0x7) == 0);
     bool f_sparsePopcount = false;
@@ -94,7 +94,7 @@ FieldAnalysis SmartFieldAnalyzer::Analyze(
             ULONG rd = 0;
             if (SUCCEEDED(DataSpaces->ReadVirtual(flinkVal + 8, &flinkBlink, sizeof(uint64_t), &rd)) && rd == 8) {
                 flinkBlink = StripPAC(flinkBlink);
-                if (flinkBlink == result.address || flinkBlink == blinkVal) {
+                if (flinkBlink == result.address || (flinkVal == blinkVal && flinkBlink == flinkVal)) {
                     f_isListEntry = true;
                     result.isListEntry = true;
                     wchar_t leBuf[128] = {};
@@ -153,15 +153,15 @@ FieldAnalysis SmartFieldAnalyzer::Analyze(
     };
 
     BayesClass classes[] = {
-        { FieldType::Padding,       0.20, 0.95, 0.01, 0.90, 0.01, 0.05, 0.01, 0.01, 0.00, 0.00, 0.00, 0.01, 8 },
-        { FieldType::ListEntry,     0.05, 0.00, 0.99, 0.10, 0.80, 0.00, 0.10, 0.00, 0.80, 0.99, 0.00, 0.01, 16},
-        { FieldType::UnicodeString, 0.05, 0.00, 0.05, 0.10, 0.50, 0.10, 0.10, 0.01, 0.01, 0.00, 0.99, 0.01, 16},
-        { FieldType::Pointer,       0.30, 0.00, 0.99, 0.10, 0.80, 0.00, 0.10, 0.01, 0.80, 0.00, 0.00, 0.01, 8 },
-        { FieldType::AsciiString,   0.05, 0.00, 0.01, 0.10, 0.50, 0.01, 0.10, 0.01, 0.00, 0.00, 0.00, 0.99, 8 },
-        { FieldType::PoolTag,       0.05, 0.00, 0.01, 0.10, 0.50, 0.01, 0.10, 0.99, 0.00, 0.00, 0.00, 0.95, 4 },
-        { FieldType::Handle,        0.05, 0.00, 0.01, 0.80, 0.01, 0.60, 0.10, 0.01, 0.00, 0.00, 0.00, 0.01, 8 },
-        { FieldType::Flags,         0.10, 0.05, 0.01, 0.80, 0.10, 0.20, 0.90, 0.01, 0.00, 0.00, 0.00, 0.01, 4 },
-        { FieldType::Integer,       0.15, 0.01, 0.01, 0.50, 0.50, 0.50, 0.50, 0.01, 0.00, 0.00, 0.00, 0.01, 4 },
+        { FieldType::Padding,       0.20, 0.95, 0.01, 0.90, 0.01, 0.05, 0.01, 0.01, 0.001, 0.001, 0.001, 0.01, 8 },
+        { FieldType::ListEntry,     0.05, 0.001, 0.99, 0.10, 0.80, 0.001, 0.10, 0.001, 0.80, 0.99, 0.001, 0.01, 16},
+        { FieldType::UnicodeString, 0.05, 0.001, 0.05, 0.10, 0.50, 0.10, 0.10, 0.01, 0.01, 0.001, 0.99, 0.01, 16},
+        { FieldType::Pointer,       0.30, 0.001, 0.99, 0.10, 0.80, 0.001, 0.10, 0.01, 0.80, 0.001, 0.001, 0.01, 8 },
+        { FieldType::AsciiString,   0.05, 0.001, 0.01, 0.10, 0.50, 0.01, 0.10, 0.01, 0.001, 0.001, 0.001, 0.99, 8 },
+        { FieldType::PoolTag,       0.05, 0.001, 0.01, 0.10, 0.50, 0.01, 0.10, 0.99, 0.001, 0.001, 0.001, 0.95, 4 },
+        { FieldType::Handle,        0.05, 0.001, 0.01, 0.80, 0.01, 0.60, 0.10, 0.01, 0.001, 0.001, 0.001, 0.01, 8 },
+        { FieldType::Flags,         0.10, 0.05, 0.01, 0.80, 0.10, 0.20, 0.90, 0.01, 0.001, 0.001, 0.001, 0.01, 4 },
+        { FieldType::Integer,       0.15, 0.01, 0.01, 0.50, 0.50, 0.50, 0.50, 0.01, 0.001, 0.001, 0.001, 0.01, 4 },
     };
 
     double maxPosterior = -1.0;
