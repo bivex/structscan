@@ -5,6 +5,8 @@
 
 #include "../include/structscan.h"
 
+#include <unordered_set>
+
 std::vector<ULONG64> CrossRefEngine::WalkListEntry(
     IDebugDataSpaces4* ds,
     ULONG64 headAddr,
@@ -13,6 +15,9 @@ std::vector<ULONG64> CrossRefEngine::WalkListEntry(
 ) {
     std::vector<ULONG64> results;
     if (!ds || headAddr == 0) return results;
+
+    std::unordered_set<ULONG64> visited;
+    visited.insert(headAddr);
 
     ULONG64 flink = 0;
     ULONG rd = 0;
@@ -23,6 +28,9 @@ std::vector<ULONG64> CrossRefEngine::WalkListEntry(
            current > 0xFFFF000000000000ULL &&
            results.size() < maxInstances)
     {
+        if (visited.count(current)) break; // Cycle / loop detected
+        visited.insert(current);
+
         ULONG64 structBase = current - listEntryOffsetInStruct;
         results.push_back(structBase);
 
