@@ -1,89 +1,83 @@
 # StructScan WinDbg Extension (v4.0)
 
-**StructScan** — высокоскоростное плагин-расширение для отладчика WinDbg (`dbgeng.dll`), предназначенное для **автоматической реконструкции непубличных структур данных** (для которых отсутствуют закрытые PDB-символы, такие как `ntdsai!gAnchor`, `nt!_OBJECT_TYPE`, кастомные структуры драйверов или объекты ядра) и генерации готового C/C++ кода.
+**StructScan** is a high-performance extension plugin for the WinDbg debugger (`dbgeng.dll`), designed for **automated reconstruction of undocumented data structures** (such as opaque kernel structures lacking private PDB symbols, custom driver objects, `ntdsai!gAnchor`, `nt!_OBJECT_TYPE`, etc.) and instant synthesis of ready-to-use C/C++ header definitions.
 
-Версия **v4.0** сочетает в себе прямой высокоскоростной анализ виртуальной памяти (`ReadVirtual`), генератор C/C++ заголовков (`emit`), вычисление энтропии Шеннона, байесовскую вероятностную классификацию полей и кросс-референсный анализ множества экземпляров через списки `LIST_ENTRY`.
+Version **v4.0** features high-speed virtual memory analysis (`ReadVirtual`), automated C/C++ header synthesis (`emit`), Shannon entropy profiling (`entropy`), Bayesian field classification, multi-instance cross-referencing via `LIST_ENTRY` chains (`list`), and advanced kernel-level Use-After-Free lifetime analysis (`!uaf`).
 
 ---
 
-## 🚀 Запуск и Использование в WinDbg
+## 🚀 Installation & WinDbg Usage
 
-### 1. Загрузка плагина в WinDbg:
+### 1. Load the Plugin into WinDbg:
 ```text
-0: kd> .load C:\Tools\windbg-agent\structscan.dll
+0: kd> .load C:\Tools\windbg-agent\structscan_x64.dll
 ```
 
-### 2. Режимы работы:
+### 2. Available Commands:
 
-#### 🔹 Режим 1: C/C++ Синтезатор Заголовков (`!structscan emit`)
-Автоматически синтезирует валидный исходный C/C++ код структуры с пэддингами, именами символов и C-типами:
+#### 🔹 Mode 1: C/C++ Header Synthesizer (`!structscan emit`)
+Synthesizes valid C/C++ struct definitions with accurate alignment, member offsets, type annotations, and symbol-derived field names:
 ```text
 0: kd> !structscan emit nt!KdDebuggerDataBlock 0x400
 ```
 
-#### 🔹 Режим 2: Байесовский анализ одиночной структуры (`!structscan`)
-Сканирует память структуры и классифицирует каждое 8-байтовое поле (указатели, UNICODE_STRING, ASCII, PoolTag, Integer, Flags, Handle, LIST_ENTRY):
+#### 🔹 Mode 2: Bayesian Single-Instance Scan (`!structscan`)
+Scans object memory and classifies each 8-byte field using Bayesian inference and heuristic analyzers (pointers, UNICODE_STRING, ASCII strings, PoolTags, Integers, Bitmasks/Flags, Handles, LIST_ENTRY):
 ```text
 0: kd> !structscan nt!PsInitialSystemProcess 0x400
 0: kd> !structscan 0xfffff802ac809ab0 0x200
 ```
 
-#### 🔹 Режим 3: Кросс-референсный анализ списка объектов (`!structscan list`)
-Автоматически находит смещение `LIST_ENTRY`, обходит цепочку связанных объектов (до 64 экземпляров) и анализирует **постоянство типов полей** на каждом смещении:
+#### 🔹 Mode 3: Multi-Instance Cross-Reference (`!structscan list`)
+Locates `LIST_ENTRY` links, walks the object chain (up to 64 instances), and cross-evaluates **field type consistency and unique value diversity** across instances:
 ```text
 0: kd> !structscan list nt!PsActiveProcessHead 0x800
 ```
 
-#### 🔹 Режим 4: Тепловая карта энтропии Шеннона (`!structscan entropy`)
-Отображает распределение энтропии в 16-байтовых окнах (позволяет быстро обнаружить указатели, шифрованные поля, теги и паддинг):
+#### 🔹 Mode 4: Shannon Entropy Heatmap (`!structscan entropy`)
+Computes and renders Shannon entropy across 16-byte blocks to pinpoint pointers, encrypted/hashed buffers, tags, and padding regions:
 ```text
 0: kd> !structscan entropy nt!PsInitialSystemProcess 0x200
 ```
 
-#### 🔹 Безопасная выгрузка:
-```text
-0: kd> !structscan unload
-[+] Run: .unload structscan
-```
+#### 🔹 Mode 5: Use-After-Free Lifetime Analyzer (`!uaf`)
+Multi-phase kernel object lifetime analysis designed to detect Use-After-Free conditions, memory reclamation patterns, and dangling pointer references.
 
-#### 🔹 Режим 5: Анализ Use-After-Free (`!uaf`)
-Многофазный анализ lifetime объекта ядра для обнаружения использования после освобождения.
-
-**Формальная модель:**
+**Formal Verification Model:**
 ```
 ALLOC(O) → LIVE(O) → FREE(O) → [REUSE(O)] → USE(O)
                                      ↑
-                     Нарушение: USE(O) ⇒ LIVE(O) должен выполняться
+                     Invariant: USE(O) requires LIVE(O)
 ```
 
-**Синтаксис:**
+**Syntax:**
 ```text
 !uaf <sym|addr> [objsize] [searchbytes]
 ```
 
-**Параметры:**
-- `sym|addr`    — символьное имя или hex-адрес подозреваемого объекта
-- `objsize`     — размер объекта в байтах (по умолчанию: `0x200`)
-- `searchbytes` — диапазон VA для поиска dangling-указателей (по умолчанию: `0x8000`)
+**Parameters:**
+- `sym|addr`    — Target symbol name (e.g. `nt!PsInitialSystemProcess`) or raw virtual address (e.g. `ffff80011234abcd`)
+- `objsize`     — Size of target object to analyze in bytes (default: `0x200`)
+- `searchbytes` — Kernel VA range centered on the object to scan for dangling back-references (default: `0x8000`)
 
-**Примеры:**
+**Examples:**
 ```text
 0: kd> !uaf nt!PsInitialSystemProcess 0x480
 0: kd> !uaf ffff8001`234abcd0 0x300 0x20000
 0: kd> !uaf win32k!gpdi
 ```
 
-**Пять фаз анализа:**
+**Five Analysis Phases:**
 
-| Фаза | Название | Что проверяет |
-|------|----------|---------------|
-| 1 | Pool Header | PoolType, валидность тега, наличие Flink/Blink free-list линковки |
-| 2 | OBJECT_HEADER | `PointerCount` / `HandleCount` — признаки деструкции объекта |
-| 3 | Content | Энтропия Шеннона + байесовский снимок полей (нулевые регионы = red flag) |
-| 4 | Dangling Refs | Обратный скан виртуальных адресов в поиске указателей на объект |
-| 5 | Risk Report | Взвешенная оценка 0–100 + готовый рецепт `ba r8 / ba w8` для WinDbg |
+| Phase | Name | Verification Checks |
+|---|---|---|
+| **1** | Pool Header | PoolType, tag validity, and free-list linkage (`Flink`/`Blink` pointers) |
+| **2** | OBJECT_HEADER | `PointerCount` and `HandleCount` destruction heuristics |
+| **3** | Content Analysis | Shannon entropy and Bayesian field classification (zeroed runs = red flag) |
+| **4** | Dangling References | Reverse pointer scan in kernel address space for active references |
+| **5** | Risk Report | Weighted risk score (0–100) + tailored `ba r8` / `ba w8` WinDbg breakpoint recipes |
 
-**Пример вывода при обнаружении UAF:**
+**Sample Output on UAF Detection:**
 ```text
 ================================================================
   StructScan !uaf v4.0  --  Object Lifetime Analyzer
@@ -121,9 +115,15 @@ ALLOC(O) → LIVE(O) → FREE(O) → [REUSE(O)] → USE(O)
     t_use NOT IN Lifetime(O)  =>  USE-AFTER-FREE
 ```
 
+#### 🔹 Plugin Unload Hint:
+```text
+0: kd> !structscan unload
+[+] Run: .unload structscan
+```
+
 ---
 
-## 📊 Пример Сгенерированного C/C++ Заголовка (`!structscan emit`)
+## 📊 Sample Synthesized C/C++ Header (`!structscan emit`)
 
 ```cpp
 // Auto-generated by StructScan v4.0 (AI Structure Synthesizer)
@@ -185,70 +185,80 @@ typedef struct _RECONSTRUCTED_nt_KdDebuggerDataBlock {
 
 ---
 
-## 📁 Структура Проекта
+## 📁 Repository Structure
 
 ```text
 structscan/
 ├── include/
-│   └── structscan.h      # Классификатор, 55+ NT Pool Tags, энтропия, кросс-референс
+│   └── structscan.h          # Core types, classifiers, 55+ NT Pool Tags, entropy, cross-ref APIs
 ├── src/
-│   └── Main.cpp          # Реализация команд !structscan, !structscan emit, !structscan list, !structscan entropy
+│   ├── Main.cpp              # WinDbg extension entry points, command dispatchers, and RAII management
+│   ├── Utils.cpp             # Target resolution, symbol queries, and output formatting helpers
+│   ├── SmartFieldAnalyzer.cpp# Bayesian field classifier and heuristic analysis engine
+│   ├── ScanEngine.cpp        # Single-instance Bayesian scanning engine
+│   ├── ListCrossRefEngine.cpp# LIST_ENTRY crawler and multi-instance profile analysis
+│   ├── HeaderSynthesizer.cpp # C/C++ header code synthesizer
+│   ├── EntropyEngine.cpp     # Shannon entropy heatmap engine
+│   └── UafEngine.cpp         # 5-phase Use-After-Free lifetime analysis engine
 ├── bin/
-│   ├── structscan_arm64.dll  # Native ARM64 (AArch64)
-│   ├── structscan_x64.dll    # Native x64 (AMD64)
-│   └── structscan_x86.dll    # Native x86 (WOW64)
-├── CMakeLists.txt        # Скрипт сборки CMake
-├── structscan.vcxproj   # Visual Studio 2022/2026 Project
+│   ├── structscan_arm64.dll  # Native ARM64 (AArch64) Windows binary
+│   └── structscan_x64.dll    # Native x64 (AMD64) Windows binary
+├── build_mingw.sh            # One-click MinGW-w64 cross-compilation script for macOS / Linux
+├── CMakeLists.txt            # Multi-platform CMake build configuration
+├── _build_arch.bat           # Windows MSVC multi-architecture build driver
 └── README.md
 ```
 
 ---
 
-## 🔨 Сборка из Исходников
+## 🔨 Building from Source
 
-### ✅ Рекомендуемый способ: `build.bat` (Ninja + CMake, мультиарх)
+### 🍎 Cross-Compiling on macOS / Linux (via MinGW-w64)
 
-```cmd
-:: Обе архитектуры (x64 + ARM64) — Release
-build.bat
+StructScan can be cross-compiled directly on macOS or Linux without needing Visual Studio or Windows:
 
-:: Только x64
-build.bat x64
+```bash
+# 1. Install MinGW-w64 via Homebrew (macOS)
+brew install mingw-w64 cmake
 
-:: Только ARM64
-build.bat arm64
+# 2. Build using the provided helper script
+./build_mingw.sh
 
-:: Удалить build\ директории
-build.bat clean
+# Or build via CMake
+cmake -B build/mingw_x64 -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ -DCMAKE_BUILD_TYPE=Release
+cmake --build build/mingw_x64
 ```
-
-**Что делает `build.bat`:**
-1. Автоматически находит VS 2026 Insiders / VS 2022 (Enterprise → Professional → Community)
-2. Ищет `cmake.exe` и `ninja.exe` в PATH, затем в директории VS
-3. Вызывает `vcvarsall.bat` с нужной архитектурой
-4. Конфигурирует отдельные build-деревья (`build\x64\`, `build\arm64\`) через CMake + Ninja
-5. Копирует результат в `bin\structscan_x64.dll` / `bin\structscan_arm64.dll`
-
-**Требования:**
-- Visual Studio 2022 / 2026 с компонентом **"MSVC ARM64 Build Tools"**
-- CMake ≥ 3.15 (в PATH или в VS)
-- Ninja ≥ 1.11 (в PATH или в VS — `Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja`)
 
 ---
 
-### Ручная сборка MSVC (одна архитектура):
+### 🪟 Building on Windows (via MSVC & Ninja)
 
+#### Recommended: Multi-Architecture Build Driver (`_build_arch.bat`)
 ```cmd
-call "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvarsall.bat" arm64
+:: Build both x64 and ARM64 releases
+_build_arch.bat
+
+:: Build x64 only
+_build_arch.bat x64
+
+:: Build ARM64 only
+_build_arch.bat arm64
+
+:: Clean build directories
+_build_arch.bat clean
+```
+
+#### Manual MSVC Command-Line:
+```cmd
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
 cl.exe /std:c++17 /O2 /EHsc /MD /LD /Iinclude ^
     src\Main.cpp src\Utils.cpp src\SmartFieldAnalyzer.cpp ^
     src\ScanEngine.cpp src\ListCrossRefEngine.cpp ^
     src\HeaderSynthesizer.cpp src\EntropyEngine.cpp src\UafEngine.cpp ^
-    /link dbgeng.lib dbghelp.lib /OUT:bin\structscan_arm64.dll
+    /link dbgeng.lib dbghelp.lib /OUT:bin\structscan_x64.dll
 ```
 
-### CMake вручную:
-
+#### Manual CMake with Ninja:
 ```bash
 cmake -S . -B build/x64 -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/x64 -- -j8
