@@ -20,3 +20,15 @@ set(SOURCES
 add_library(structscan SHARED ${SOURCES})
 
 target_link_libraries(structscan PRIVATE dbgeng dbghelp)
+
+# Standalone DLL configuration
+set_target_properties(structscan PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "structscan_x64"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin"
+)
+
+if(MINGW)
+    target_link_options(structscan PRIVATE -static-libgcc -static-libstdc++ -Wl,--enable-auto-image-base)
+endif()

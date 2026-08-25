@@ -274,7 +274,7 @@ public:
     const std::wstring& GetText() const override { return m_buffer; }
 };
 
-class DebugOutputCaptureSink : public IDebugOutputCallbacks2 {
+class DebugOutputCaptureSink : public IDebugOutputCallbacks {
 private:
     ULONG        m_refCount{1};
     IOutputSink* m_sink{nullptr};
@@ -284,9 +284,8 @@ public:
 
     STDMETHODIMP QueryInterface(REFIID InterfaceId, PVOID* Interface) override {
         if (InterfaceId == __uuidof(IUnknown) ||
-            InterfaceId == __uuidof(IDebugOutputCallbacks) ||
-            InterfaceId == __uuidof(IDebugOutputCallbacks2)) {
-            *Interface = static_cast<IDebugOutputCallbacks2*>(this);
+            InterfaceId == __uuidof(IDebugOutputCallbacks)) {
+            *Interface = static_cast<IDebugOutputCallbacks*>(this);
             AddRef();
             return S_OK;
         }
@@ -308,14 +307,6 @@ public:
                 m_sink->Append(wb.data());
             }
         }
-        return S_OK;
-    }
-    STDMETHODIMP GetInterestMask(PULONG Mask) override {
-        if (Mask) *Mask = DEBUG_OUTCBI_ANY_FORMAT;
-        return S_OK;
-    }
-    STDMETHODIMP Output2(ULONG, ULONG, ULONG64, PCWSTR Text) override {
-        if (Text && m_sink) m_sink->Append(Text);
         return S_OK;
     }
 };
