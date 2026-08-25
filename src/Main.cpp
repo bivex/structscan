@@ -82,39 +82,59 @@ static void PrintStructscanUsage(IDebugControl4* ctrl) {
         EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
 }
 
+using SubCommandHandler = HRESULT (*)(const DebugContext& ctx, const CommandArgs& args);
+
+static HRESULT HandleUnloadCommand(const DebugContext& ctx, const CommandArgs&) {
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] Run: .unload structscan\n");
+    return S_OK;
+}
+
+static HRESULT HandleEmitCommand(const DebugContext& ctx, const CommandArgs& args) {
+    if (wcslen(args.tok1) == 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan emit <sym|addr> [size]\n");
+        return E_INVALIDARG;
+    }
+    return DoEmitHeader(ctx, args.tok1, ParseHexWithDefault(args.tok2, 0x400));
+}
+
+static HRESULT HandleEntropyCommand(const DebugContext& ctx, const CommandArgs& args) {
+    if (wcslen(args.tok1) == 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan entropy <sym|addr> [size]\n");
+        return E_INVALIDARG;
+    }
+    return DoEntropyMap(ctx, args.tok1, ParseHexWithDefault(args.tok2, 0x200));
+}
+
+static HRESULT HandleListCommand(const DebugContext& ctx, const CommandArgs& args) {
+    if (wcslen(args.tok1) == 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan list <sym|addr> [size]\n");
+        return E_INVALIDARG;
+    }
+    return DoListCrossRef(ctx, args.tok1, ParseHexWithDefault(args.tok2, 0x400));
+}
+
+struct CommandEntry {
+    const wchar_t*    name;
+    SubCommandHandler handler;
+};
+
+static const CommandEntry kCommandEntries[] = {
+    { L"unload",  HandleUnloadCommand },
+    { L"emit",    HandleEmitCommand },
+    { L"entropy", HandleEntropyCommand },
+    { L"list",    HandleListCommand },
+};
+
 static HRESULT DispatchStructScanCommand(const DebugContext& ctx, const CommandArgs& args) {
     if (args.count <= 0 || wcslen(args.tok0) == 0) {
         PrintStructscanUsage(ctx.ctrl);
         return S_OK;
     }
 
-    if (_wcsicmp(args.tok0, L"unload") == 0) {
-        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] Run: .unload structscan\n");
-        return S_OK;
-    }
-
-    if (_wcsicmp(args.tok0, L"emit") == 0) {
-        if (wcslen(args.tok1) == 0) {
-            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan emit <sym|addr> [size]\n");
-            return E_INVALIDARG;
+    for (const auto& entry : kCommandEntries) {
+        if (_wcsicmp(args.tok0, entry.name) == 0) {
+            return entry.handler(ctx, args);
         }
-        return DoEmitHeader(ctx, args.tok1, ParseHexWithDefault(args.tok2, 0x400));
-    }
-
-    if (_wcsicmp(args.tok0, L"entropy") == 0) {
-        if (wcslen(args.tok1) == 0) {
-            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan entropy <sym|addr> [size]\n");
-            return E_INVALIDARG;
-        }
-        return DoEntropyMap(ctx, args.tok1, ParseHexWithDefault(args.tok2, 0x200));
-    }
-
-    if (_wcsicmp(args.tok0, L"list") == 0) {
-        if (wcslen(args.tok1) == 0) {
-            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan list <sym|addr> [size]\n");
-            return E_INVALIDARG;
-        }
-        return DoListCrossRef(ctx, args.tok1, ParseHexWithDefault(args.tok2, 0x400));
     }
 
     return DoSingleScan(ctx, args.tok0, ParseHexWithDefault(args.tok1, 0x400));
