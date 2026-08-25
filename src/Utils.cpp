@@ -7,30 +7,30 @@
 #include <cwchar>
 
 ULONG64 ResolveTarget(
-    IDebugControl4*  ctrl,
-    IDebugSymbols4*  sym,
-    const wchar_t*   token,
-    ULONG64*         outModBase,
-    wchar_t*         outModName,
-    size_t           modNameCch,
-    ULONG*           outModSize
+    IDebugSymbols4* sym,
+    const wchar_t*  token,
+    ModuleInfo*     outModInfo
 ) {
+    if (!token || !sym) return 0;
+
     wchar_t* end = nullptr;
     ULONG64 addr = wcstoull(token, &end, 16);
     if (end != token && *end == L'\0' && addr >= 0x10000) return addr;
 
     wchar_t modName[128] = {};
-    wchar_t* bang = const_cast<wchar_t*>(wcschr(token, L'!'));
+    const wchar_t* bang = wcschr(token, L'!');
     if (bang) {
         wcsncpy_s(modName, token, bang - token);
-        ULONG idx = 0; ULONG64 modBase = 0;
+        ULONG idx = 0;
+        ULONG64 modBase = 0;
         if (SUCCEEDED(sym->GetModuleByModuleNameWide(modName, 0, &idx, &modBase))) {
-            if (outModBase) *outModBase = modBase;
-            if (outModName && modNameCch) wcsncpy_s(outModName, modNameCch, modName, _TRUNCATE);
-            if (outModSize) {
+            if (outModInfo) {
+                outModInfo->base = modBase;
+                wcsncpy_s(outModInfo->name, modName, _TRUNCATE);
                 DEBUG_MODULE_PARAMETERS mp = {};
-                sym->GetModuleParameters(1, nullptr, idx, &mp);
-                *outModSize = mp.Size;
+                if (SUCCEEDED(sym->GetModuleParameters(1, nullptr, idx, &mp))) {
+                    outModInfo->size = mp.Size;
+                }
             }
         }
     }

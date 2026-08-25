@@ -314,427 +314,452 @@ static void Sep(IDebugControl4* ctrl, const wchar_t* title) {
         L"\n[=== %s ===]\n", title);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DoUafAnalysis — main entry point called from Main.cpp
-// ─────────────────────────────────────────────────────────────────────────────
+struct UafContext {
+    const DebugContext&  debug;
+    const UafScanParams& params;
+    ULONG64              targetAddr{0};
+};
+
+static void ExecutePhase1_PoolHeader(
+    const UafContext& ctx,
+    int& riskScore,
+    int& evidenceItems,
+    PoolAnalysis& outPool
+) {
+    Sep(ctx.debug.ctrl, L"PHASE 1 · Pool Header Analysis  (object - 0x10)");
+    outPool = AnalyzePoolHeader(ctx.debug.ds, ctx.targetAddr);
+
+    if (!outPool.readable) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [!] Pool header at 0x%016llx is NOT readable\n"
+            L"      (memory may be paged out, or this is not a pool allocation)\n",
+            static_cast<unsigned long long>(ctx.targetAddr - 0x10));
+        return;
+    }
+
+    wchar_t tagChars[8] = {};
+    for (int i = 0; i < 4; i++) {
+        uint8_t b = (outPool.tag >> (i * 8)) & 0xFF;
+        tagChars[i] = (b >= 0x20 && b <= 0x7E) ? static_cast<wchar_t>(b) : L'?';
+    }
+    const PoolTagInfo* ti = SmartFieldAnalyzer::FindPoolTag(outPool.tag);
+
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  PoolHeader : 0x%016llx\n",
+        static_cast<unsigned long long>(ctx.targetAddr - 0x10));
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  PoolTag    : '%c%c%c%c' (0x%08x)%s%S%s\n",
+        tagChars[0], tagChars[1], tagChars[2], tagChars[3],
+        outPool.tag,
+        ti ? L" -> " : L"",
+        ti ? ti->description : "",
+        outPool.tagPrintable ? L"" : L"  [!] NON-PRINTABLE TAG");
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  PoolType   : %s\n", PoolTypeName(outPool.poolType));
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  BlockSize  : 0x%02x  (-> 0x%lx bytes allocation)\n",
+        outPool.blockSize,
+        static_cast<unsigned long>(outPool.blockSize) * 16UL);
+
+    if (outPool.suspectFree) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [!] Pool header/payload suggests FREED state:\n");
+        uint64_t w0 = 0, w8 = 0;
+        ULONG rd2 = 0;
+        ctx.debug.ds->ReadVirtual(ctx.targetAddr,     &w0, 8, &rd2);
+        ctx.debug.ds->ReadVirtual(ctx.targetAddr + 8, &w8, 8, &rd2);
+        if (IsKernelVA(w0) && IsKernelVA(w8) && w0 != ctx.targetAddr && w8 != ctx.targetAddr && w0 != w8) {
+            ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"      - Object[+0]  = 0x%016llx  (free-list Flink?)\n"
+                L"      - Object[+8]  = 0x%016llx  (free-list Blink?)\n",
+                static_cast<unsigned long long>(w0),
+                static_cast<unsigned long long>(w8));
+        }
+        riskScore += 40;
+        evidenceItems++;
+    } else if (outPool.tagPrintable) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [+] Pool header consistent with LIVE allocation\n");
+    } else {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [*] No standard POOL_HEADER at -0x10 (BigPool / SegmentHeap / Optional OBJECT_HEADER)\n");
+    }
+}
+
+static void ExecutePhase2_ObjectHeader(
+    const UafContext& ctx,
+    int& riskScore,
+    int& evidenceItems,
+    ObjHdrAnalysis& outOh
+) {
+    Sep(ctx.debug.ctrl, L"PHASE 2 · OBJECT_HEADER Analysis  (object - 0x30)");
+    outOh = AnalyzeObjectHeader(ctx.debug.ds, ctx.targetAddr);
+
+    if (!outOh.readable) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [!] OBJECT_HEADER at 0x%016llx not readable\n"
+            L"      (target may not be a kernel object, or header is paged out)\n",
+            static_cast<unsigned long long>(ctx.targetAddr - kObjBodyOffset));
+        return;
+    }
+
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  ObjHeader  : 0x%016llx\n",
+        static_cast<unsigned long long>(ctx.targetAddr - kObjBodyOffset));
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  PointerCnt : %lld%s\n",
+        static_cast<long long>(outOh.pointerCount),
+        outOh.pointerCount <= 0 ? L"  [!] <= 0 (FREED/fully dereferenced)" : L"");
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  HandleCnt  : %lld%s\n",
+        static_cast<long long>(outOh.handleCount),
+        outOh.handleCount < 0 ? L"  [!] < 0 (closed/freed encoding)" : L"");
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  TypeIndex  : 0x%02x   Flags: 0x%02x   InfoMask: 0x%02x\n",
+        outOh.typeIndex, outOh.flags, outOh.infoMask);
+
+    if (outOh.refCountsSuspect) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [!] Reference counts are SUSPECT — object may be freed/corrupted\n");
+        riskScore += 30;
+        evidenceItems++;
+    } else if (outOh.pointerCount > 0 && outOh.handleCount >= 0 && outOh.typeIndex > 0) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [+] Reference counts indicate LIVE Object (PointerCount=%lld, HandleCount=%lld)\n",
+            static_cast<long long>(outOh.pointerCount),
+            static_cast<long long>(outOh.handleCount));
+        riskScore = (std::max)(0, riskScore - 25);
+    } else {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [+] Reference counts look LIVE (PointerCount > 0)\n");
+        riskScore = (std::max)(0, riskScore - 10);
+    }
+}
+
+static void PrintBayesFieldSnapshot(const UafContext& ctx, int& riskScore, int& evidenceItems) {
+    SmartFieldAnalyzer analyzer;
+    analyzer.DataSpaces = ctx.debug.ds;
+    analyzer.Symbols    = ctx.debug.sym;
+
+    std::vector<uint8_t> objBuf(ctx.params.objSize);
+    ULONG rd3 = 0;
+    if (SUCCEEDED(ctx.debug.ds->ReadVirtual(ctx.targetAddr, objBuf.data(), ctx.params.objSize, &rd3)) && rd3 >= 8) {
+        ULONG snapshotBytes = std::min(rd3, static_cast<ULONG>(0x80));
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"\n  Field snapshot (first 0x%lx bytes, confidence > 30%%):\n",
+            static_cast<unsigned long>(snapshotBytes));
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  Offset    Address               Type              "
+            L"Entropy  Confidence  Annotation\n"
+            L"  --------  --------------------  ----------------  "
+            L"-------  ----------  ------------------------------\n");
+
+        ULONG fieldCount = 0;
+        for (ULONG off = 0; off + 8 <= snapshotBytes; ) {
+            auto fa = analyzer.Analyze(objBuf.data(), rd3, off, ctx.targetAddr);
+            if (fa.type != FieldType::Unknown &&
+                fa.type != FieldType::Padding &&
+                fa.confidence > 0.30)
+            {
+                PrintField(ctx.debug.ctrl, fa);
+                fieldCount++;
+            }
+            off += (fa.size > 0) ? fa.size : 8;
+            if (fieldCount >= 8) break;
+        }
+        if (fieldCount == 0) {
+            ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"  (no high-confidence fields — object may be zeroed or freed)\n");
+            riskScore += 10;
+            evidenceItems++;
+        }
+    }
+}
+
+static void ExecutePhase3_Content(
+    const UafContext& ctx,
+    int& riskScore,
+    int& evidenceItems
+) {
+    Sep(ctx.debug.ctrl, L"PHASE 3 · Content Analysis (entropy + field classifier)");
+
+    auto ca = AnalyzeContent(ctx.debug.ds, ctx.targetAddr, ctx.params.objSize);
+    if (!ca.readable) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  [!] Object content not readable\n");
+        return;
+    }
+
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  Entropy    : %.3f bits  (8.0 = random, 0.0 = all-zero)\n",
+        ca.overallEntropy);
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  Zero run   : 0x%lx bytes @ +0x%04lx\n",
+        static_cast<unsigned long>(ca.longestZeroRunLen),
+        static_cast<unsigned long>(ca.longestZeroRunOffset));
+
+    if (ca.looksCorrupted) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [!] Very low entropy / large zero region — content SUSPECT\n"
+            L"      (freed allocator may zero memory or leave freelist ptrs)\n");
+        riskScore += 20;
+        evidenceItems++;
+    } else {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [+] Content entropy normal for a live object\n");
+        riskScore = (std::max)(0, riskScore - 5);
+    }
+
+    PrintBayesFieldSnapshot(ctx, riskScore, evidenceItems);
+}
+
+static void ExecutePhase4_DanglingRefs(
+    const UafContext& ctx,
+    const PoolAnalysis& pool,
+    const ObjHdrAnalysis& oh,
+    int& riskScore,
+    int& evidenceItems,
+    std::vector<DanglingRef>& outRefs
+) {
+    Sep(ctx.debug.ctrl, L"PHASE 4 · Dangling Reference Scan");
+
+    ULONG64 scanStart = (ctx.targetAddr > static_cast<ULONG64>(ctx.params.searchBytes) / 2)
+                        ? ctx.targetAddr - ctx.params.searchBytes / 2
+                        : ctx.targetAddr;
+
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  Scanning 0x%016llx .. 0x%016llx\n"
+        L"  Looking for 8-byte aligned pointers in range [0x%016llx .. 0x%016llx)\n"
+        L"  (Ctrl+C aborts scan early)\n\n",
+        static_cast<unsigned long long>(scanStart),
+        static_cast<unsigned long long>(scanStart + ctx.params.searchBytes),
+        static_cast<unsigned long long>(ctx.targetAddr),
+        static_cast<unsigned long long>(ctx.targetAddr + ctx.params.objSize));
+
+    outRefs = ScanDanglingRefs(ctx.debug.ctrl, ctx.debug.ds, ctx.targetAddr, ctx.params.objSize, scanStart, ctx.params.searchBytes);
+
+    if (outRefs.empty()) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [+] No back-references found in scanned range\n"
+            L"      (try wider search: !uaf %s 0x%lx 0x%lx)\n",
+            ctx.params.target,
+            static_cast<unsigned long>(ctx.params.objSize),
+            static_cast<unsigned long>(ctx.params.searchBytes * 4));
+        return;
+    }
+
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  Found %llu pointer(s) referencing 0x%016llx:\n\n",
+        static_cast<unsigned long long>(outRefs.size()),
+        static_cast<unsigned long long>(ctx.targetAddr));
+
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  Ref Address           Target Offset   Symbol / Context\n"
+        L"  --------------------  --------------  --------------------------------------------------\n");
+
+    for (const auto& ref : outRefs) {
+        wchar_t sn[256] = {};
+        ULONG64 sd = 0;
+        std::wstring label;
+        if (SUCCEEDED(ctx.debug.sym->GetNameByOffsetWide(ref.refAddr, sn, _countof(sn), nullptr, &sd))) {
+            label = sn;
+            if (sd > 0) {
+                wchar_t db[32] = {};
+                swprintf_s(db, L"+0x%llx", static_cast<unsigned long long>(sd));
+                label += db;
+            }
+        } else {
+            label = L"<no symbol>";
+        }
+
+        wchar_t offStr[32] = {};
+        if (ref.offset == 0) swprintf_s(offStr, L"+0x00 (Base)");
+        else swprintf_s(offStr, L"+0x%02x", ref.offset);
+
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  0x%016llx    %-14s  %s\n",
+            static_cast<unsigned long long>(ref.refAddr),
+            offStr,
+            label.c_str());
+    }
+
+    if (pool.suspectFree || oh.refCountsSuspect) {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"\n  [!!] FREED object with %llu dangling pointer(s) -- STRONG UAF SIGNAL\n",
+            static_cast<unsigned long long>(outRefs.size()));
+        riskScore += 50;
+        evidenceItems += 2;
+    } else {
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"\n  [+] Object has %llu active reference(s) from nearby kernel structures.\n",
+            static_cast<unsigned long long>(outRefs.size()));
+    }
+}
+
+static std::wstring FormatRiskBar(int riskScore, int width) {
+    std::wstring bar;
+    bar.reserve(width);
+    int barFill = (riskScore * width) / 100;
+    for (int i = 0; i < width; i++) {
+        if (i < barFill) {
+            bar += (riskScore >= 70) ? L'#' : (riskScore >= 35) ? L'=' : L'-';
+        } else {
+            bar += L'.';
+        }
+    }
+    return bar;
+}
+
+static void PrintRiskVerdict(const UafContext& ctx, LifetimeState state, const std::vector<DanglingRef>& refs) {
+    switch (state) {
+    case LifetimeState::Freed:
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [!!!] HIGH RISK -- LIKELY USE-AFTER-FREE\n\n"
+            L"  Evidence:\n"
+            L"    - Pool header / free-list linkage indicate FREED state\n"
+            L"    - %llu dangling pointer(s) still reference this address\n"
+            L"    - Object content entropy / ref-counts are SUSPECT\n\n"
+            L"  WinDbg Breakpoint Recipe:\n"
+            L"    ba r8 0x%016llx   <- break on any READ of freed object\n"
+            L"    ba w8 0x%016llx   <- break on re-use/overwrite by allocator\n\n"
+            L"  Formal model at this address:\n"
+            L"    t_free < t_use  =>  UAF(O) proven\n"
+            L"    Lifetime(O) = [t_alloc, t_free)\n"
+            L"    t_use NOT IN Lifetime(O)  =>  USE-AFTER-FREE\n\n"
+            L"  Next Steps:\n"
+            L"    1. !structscan 0x%016llx 0x%lx   -- deep field analysis\n"
+            L"    2. Check dangling ref addresses above for caller context\n"
+            L"    3. kb / k to correlate with current call stack\n",
+            static_cast<unsigned long long>(refs.size()),
+            static_cast<unsigned long long>(ctx.targetAddr),
+            static_cast<unsigned long long>(ctx.targetAddr),
+            static_cast<unsigned long long>(ctx.targetAddr),
+            static_cast<unsigned long>(ctx.params.objSize));
+        break;
+
+    case LifetimeState::Suspect:
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [!]  MODERATE RISK -- AMBIGUOUS LIFETIME STATE\n\n"
+            L"  Some signals suggest UAF but evidence is not conclusive.\n\n"
+            L"  Next Steps:\n"
+            L"    1. Widen the search: !uaf %s 0x%lx 0x%lx\n"
+            L"    2. Inspect field detail: !structscan 0x%016llx 0x%lx\n"
+            L"    3. Check if address was previously freed: !pool 0x%016llx\n"
+            L"    4. Set a conditional bp on the object: ba r8 0x%016llx\n",
+            ctx.params.target,
+            static_cast<unsigned long>(ctx.params.objSize),
+            static_cast<unsigned long>(ctx.params.searchBytes * 4),
+            static_cast<unsigned long long>(ctx.targetAddr),
+            static_cast<unsigned long>(ctx.params.objSize),
+            static_cast<unsigned long long>(ctx.targetAddr),
+            static_cast<unsigned long long>(ctx.targetAddr));
+        break;
+
+    default: // Live
+        ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [+]  LOW RISK -- Object appears LIVE\n\n"
+            L"  No strong UAF indicators found in scanned range.\n\n"
+            L"  If you suspect UAF at a specific call site:\n"
+            L"    - Set a bp BEFORE the suspected free: bp <free_site>\n"
+            L"    - Note the VA of the object at that point\n"
+            L"    - Then: !uaf <VA> 0x%lx 0x%lx  after free returns\n"
+            L"    - Compare the lifetime model: t_free < t_use\n",
+            static_cast<unsigned long>(ctx.params.objSize),
+            static_cast<unsigned long>(ctx.params.searchBytes));
+        break;
+    }
+}
+
+static void ExecutePhase5_RiskReport(
+    const UafContext& ctx,
+    int riskScore,
+    int evidenceItems,
+    const std::vector<DanglingRef>& refs
+) {
+    if (riskScore > 100) riskScore = 100;
+    if (riskScore < 0)   riskScore = 0;
+
+    LifetimeState state = (riskScore >= 70) ? LifetimeState::Freed :
+                          (riskScore >= 35) ? LifetimeState::Suspect :
+                                              LifetimeState::Live;
+
+    std::wstring riskBar = FormatRiskBar(riskScore, 40);
+
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n"
+        L"================================================================\n"
+        L"  PHASE 5 -- UAF Risk Report\n"
+        L"================================================================\n\n"
+        L"  Object  : 0x%016llx\n"
+        L"  State   : %s\n"
+        L"  Score   : %d / 100   (evidence items: %d)\n"
+        L"  Risk    : [%s] %d%%\n\n",
+        static_cast<unsigned long long>(ctx.targetAddr),
+        LifetimeStateName(state),
+        riskScore, evidenceItems,
+        riskBar.c_str(), riskScore);
+
+    PrintRiskVerdict(ctx, state, refs);
+
+    ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n"
+        L"  UAF Lifetime Model:\n"
+        L"    ALLOC(O) -> LIVE(O) -> FREE(O) -> [REUSE(O)] -> USE(O)\n"
+        L"    Violation: USE(O) requires LIVE(O) -- t_use in [t_alloc, t_free)\n\n"
+        L"================================================================\n\n");
+}
 
 HRESULT DoUafAnalysis(
-    IDebugControl4*    ctrl,
-    IDebugSymbols4*    sym,
-    IDebugDataSpaces4* ds,
-    const wchar_t*     target,
-    ULONG              objSize,
-    ULONG              searchBytes
+    const DebugContext&  debugCtx,
+    const UafScanParams& params
 ) {
-    // ── Banner ──────────────────────────────────────────────────────────────
-    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+    debugCtx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"================================================================\n"
         L"  StructScan !uaf v4.0  --  Object Lifetime Analyzer\n"
         L"  Model: ALLOC->LIVE->FREE->[REUSE]->USE  |  USE=>LIVE must hold\n"
         L"================================================================\n\n");
 
-    // ── Resolve target ──────────────────────────────────────────────────────
-    ULONG64 addr = ResolveTarget(ctrl, sym, target, nullptr, nullptr, 0, nullptr);
+    ULONG64 addr = ResolveTarget(debugCtx.sym, params.target, nullptr);
     if (addr == 0) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"[-] Cannot resolve target: %s\n", target);
+        debugCtx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[-] Cannot resolve target: %s\n", params.target);
         return E_FAIL;
     }
 
-    // Try reverse lookup for a friendly symbol label
     wchar_t symLabel[256] = {};
     ULONG64 disp = 0;
-    bool hasSym = SUCCEEDED(sym->GetNameByOffsetWide(addr, symLabel, _countof(symLabel), nullptr, &disp));
+    bool hasSym = SUCCEEDED(debugCtx.sym->GetNameByOffsetWide(addr, symLabel, _countof(symLabel), nullptr, &disp));
 
-    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"  Target   : %s\n", target);
+    debugCtx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  Target   : %s\n", params.target);
     if (hasSym) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  Symbol   : %s", symLabel);
-        if (disp > 0) ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"+0x%llx", disp);
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n");
+        debugCtx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  Symbol   : %s", symLabel);
+        if (disp > 0) debugCtx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"+0x%llx", disp);
+        debugCtx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n");
     }
-    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+    debugCtx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"  Address  : 0x%016llx\n"
         L"  ObjSize  : 0x%lx bytes\n"
         L"  Search   : 0x%lx bytes (centered on object)\n\n",
         static_cast<unsigned long long>(addr),
-        static_cast<unsigned long>(objSize),
-        static_cast<unsigned long>(searchBytes));
+        static_cast<unsigned long>(params.objSize),
+        static_cast<unsigned long>(params.searchBytes));
 
-    // ── Scoring state ────────────────────────────────────────────────────────
-    // Each phase contributes evidence for/against UAF.
-    // riskScore 0-100: >= 70 = Freed, >= 35 = Suspect, < 35 = Live
-    int riskScore      = 0;
-    int evidenceItems  = 0;
+    UafContext ctx{ debugCtx, params, addr };
+    int riskScore = 0;
+    int evidenceItems = 0;
 
-    // ── PHASE 1: Pool Header ─────────────────────────────────────────────────
-    Sep(ctrl, L"PHASE 1 · Pool Header Analysis  (object - 0x10)");
+    PoolAnalysis pool{};
+    ExecutePhase1_PoolHeader(ctx, riskScore, evidenceItems, pool);
 
-    auto pool = AnalyzePoolHeader(ds, addr);
-    if (!pool.readable) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  [!] Pool header at 0x%016llx is NOT readable\n"
-            L"      (memory may be paged out, or this is not a pool allocation)\n",
-            static_cast<unsigned long long>(addr - 0x10));
-    } else {
-        // Format pool tag as 4 ASCII chars
-        wchar_t tagChars[8] = {};
-        for (int i = 0; i < 4; i++) {
-            uint8_t b = (pool.tag >> (i * 8)) & 0xFF;
-            tagChars[i] = (b >= 0x20 && b <= 0x7E) ? static_cast<wchar_t>(b) : L'?';
-        }
-        // Look up known tag
-        const PoolTagInfo* ti = SmartFieldAnalyzer::FindPoolTag(pool.tag);
+    ObjHdrAnalysis oh{};
+    ExecutePhase2_ObjectHeader(ctx, riskScore, evidenceItems, oh);
 
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  PoolHeader : 0x%016llx\n",
-            static_cast<unsigned long long>(addr - 0x10));
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  PoolTag    : '%c%c%c%c' (0x%08x)%s%S%s\n",
-            tagChars[0], tagChars[1], tagChars[2], tagChars[3],
-            pool.tag,
-            ti ? L" -> " : L"",
-            ti ? ti->description : "",
-            pool.tagPrintable ? L"" : L"  [!] NON-PRINTABLE TAG");
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  PoolType   : %s\n", PoolTypeName(pool.poolType));
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  BlockSize  : 0x%02x  (-> 0x%lx bytes allocation)\n",
-            pool.blockSize,
-            static_cast<unsigned long>(pool.blockSize) * 16UL);
+    ExecutePhase3_Content(ctx, riskScore, evidenceItems);
 
-        if (pool.suspectFree) {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  [!] Pool header/payload suggests FREED state:\n");
-            {
-                uint64_t w0 = 0, w8 = 0; ULONG rd2 = 0;
-                ds->ReadVirtual(addr,     &w0, 8, &rd2);
-                ds->ReadVirtual(addr + 8, &w8, 8, &rd2);
-                if (IsKernelVA(w0) && IsKernelVA(w8) && w0 != addr && w8 != addr && w0 != w8) {
-                    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                        L"      - Object[+0]  = 0x%016llx  (free-list Flink?)\n"
-                        L"      - Object[+8]  = 0x%016llx  (free-list Blink?)\n",
-                        static_cast<unsigned long long>(w0),
-                        static_cast<unsigned long long>(w8));
-                }
-            }
-            riskScore    += 40;
-            evidenceItems++;
-        } else if (pool.tagPrintable) {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  [+] Pool header consistent with LIVE allocation\n");
-        } else {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  [*] No standard POOL_HEADER at -0x10 (BigPool / SegmentHeap / Optional OBJECT_HEADER)\n");
-        }
-    }
+    std::vector<DanglingRef> refs;
+    ExecutePhase4_DanglingRefs(ctx, pool, oh, riskScore, evidenceItems, refs);
 
-    // ── PHASE 2: OBJECT_HEADER ───────────────────────────────────────────────
-    Sep(ctrl, L"PHASE 2 · OBJECT_HEADER Analysis  (object - 0x30)");
-
-    auto oh = AnalyzeObjectHeader(ds, addr);
-    if (!oh.readable) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  [!] OBJECT_HEADER at 0x%016llx not readable\n"
-            L"      (target may not be a kernel object, or header is paged out)\n",
-            static_cast<unsigned long long>(addr - kObjBodyOffset));
-    } else {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  ObjHeader  : 0x%016llx\n",
-            static_cast<unsigned long long>(addr - kObjBodyOffset));
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  PointerCnt : %lld%s\n",
-            static_cast<long long>(oh.pointerCount),
-            oh.pointerCount <= 0 ? L"  [!] <= 0 (FREED/fully dereferenced)" : L"");
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  HandleCnt  : %lld%s\n",
-            static_cast<long long>(oh.handleCount),
-            oh.handleCount < 0 ? L"  [!] < 0 (closed/freed encoding)" : L"");
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  TypeIndex  : 0x%02x   Flags: 0x%02x   InfoMask: 0x%02x\n",
-            oh.typeIndex, oh.flags, oh.infoMask);
-
-        if (oh.refCountsSuspect) {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  [!] Reference counts are SUSPECT — object may be freed/corrupted\n");
-            riskScore    += 30;
-            evidenceItems++;
-        } else if (oh.pointerCount > 0 && oh.handleCount >= 0 && oh.typeIndex > 0) {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  [+] Reference counts indicate LIVE Object (PointerCount=%lld, HandleCount=%lld)\n",
-                static_cast<long long>(oh.pointerCount),
-                static_cast<long long>(oh.handleCount));
-            // Strong counter-evidence for live objects: reduce risk score
-            riskScore = (std::max)(0, riskScore - 25);
-        } else {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  [+] Reference counts look LIVE (PointerCount > 0)\n");
-            riskScore = (std::max)(0, riskScore - 10);
-        }
-    }
-
-    // ── PHASE 3: Content Analysis ────────────────────────────────────────────
-    Sep(ctrl, L"PHASE 3 · Content Analysis (entropy + field classifier)");
-
-    auto ca = AnalyzeContent(ds, addr, objSize);
-    if (!ca.readable) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  [!] Object content not readable\n");
-    } else {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  Entropy    : %.3f bits  (8.0 = random, 0.0 = all-zero)\n",
-            ca.overallEntropy);
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  Zero run   : 0x%lx bytes @ +0x%04lx\n",
-            static_cast<unsigned long>(ca.longestZeroRunLen),
-            static_cast<unsigned long>(ca.longestZeroRunOffset));
-
-        if (ca.looksCorrupted) {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  [!] Very low entropy / large zero region — content SUSPECT\n"
-                L"      (freed allocator may zero memory or leave freelist ptrs)\n");
-            riskScore    += 20;
-            evidenceItems++;
-        } else {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  [+] Content entropy normal for a live object\n");
-            riskScore = (std::max)(0, riskScore - 5);
-        }
-
-        // Bayesian field snapshot (first min(objSize, 0x80) bytes)
-        SmartFieldAnalyzer analyzer;
-        analyzer.DataSpaces = ds;
-        analyzer.Symbols    = sym;
-
-        std::vector<uint8_t> objBuf(objSize);
-        ULONG rd3 = 0;
-        if (SUCCEEDED(ds->ReadVirtual(addr, objBuf.data(), objSize, &rd3)) && rd3 >= 8) {
-            ULONG snapshotBytes = std::min(rd3, static_cast<ULONG>(0x80));
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"\n  Field snapshot (first 0x%lx bytes, confidence > 30%%):\n",
-                static_cast<unsigned long>(snapshotBytes));
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  Offset    Address               Type              "
-                L"Entropy  Confidence  Annotation\n"
-                L"  --------  --------------------  ----------------  "
-                L"-------  ----------  ------------------------------\n");
-
-            ULONG fieldCount = 0;
-            for (ULONG off = 0; off + 8 <= snapshotBytes; ) {
-                auto fa = analyzer.Analyze(objBuf.data(), rd3, off, addr);
-                if (fa.type != FieldType::Unknown &&
-                    fa.type != FieldType::Padding  &&
-                    fa.confidence > 0.30)
-                {
-                    PrintField(ctrl, fa);
-                    fieldCount++;
-                }
-                off += (fa.size > 0) ? fa.size : 8;
-                if (fieldCount >= 8) break;
-            }
-            if (fieldCount == 0) {
-                ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                    L"  (no high-confidence fields — object may be zeroed or freed)\n");
-                riskScore    += 10;
-                evidenceItems++;
-            }
-        }
-    }
-
-    // ── PHASE 4: Dangling Reference Scan ─────────────────────────────────────
-    Sep(ctrl, L"PHASE 4 · Dangling Reference Scan");
-
-    // Center the scan window on the object address
-    ULONG64 scanStart = (addr > static_cast<ULONG64>(searchBytes) / 2)
-                        ? addr - searchBytes / 2
-                        : addr;
-
-    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"  Scanning 0x%016llx .. 0x%016llx\n"
-        L"  Looking for 8-byte aligned pointers in range [0x%016llx .. 0x%016llx)\n"
-        L"  (Ctrl+C aborts scan early)\n\n",
-        static_cast<unsigned long long>(scanStart),
-        static_cast<unsigned long long>(scanStart + searchBytes),
-        static_cast<unsigned long long>(addr),
-        static_cast<unsigned long long>(addr + objSize));
-
-    auto refs = ScanDanglingRefs(ctrl, ds, addr, objSize, scanStart, searchBytes);
-
-    if (refs.empty()) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  [+] No back-references found in scanned range\n"
-            L"      (try wider search: !uaf %s 0x%lx 0x%lx)\n",
-            target,
-            static_cast<unsigned long>(objSize),
-            static_cast<unsigned long>(searchBytes * 4));
-    } else {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  Found %llu pointer(s) referencing 0x%016llx:\n\n",
-            static_cast<unsigned long long>(refs.size()),
-            static_cast<unsigned long long>(addr));
-
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  Ref Address           Target Offset   Symbol / Context\n"
-            L"  --------------------  --------------  --------------------------------------------------\n");
-
-        for (const auto& ref : refs) {
-            wchar_t sn[256] = {}; ULONG64 sd = 0;
-            std::wstring label;
-            if (SUCCEEDED(sym->GetNameByOffsetWide(ref.refAddr, sn, _countof(sn), nullptr, &sd))) {
-                label = sn;
-                if (sd > 0) {
-                    wchar_t db[32] = {};
-                    swprintf_s(db, L"+0x%llx", static_cast<unsigned long long>(sd));
-                    label += db;
-                }
-            } else {
-                label = L"<no symbol>";
-            }
-
-            wchar_t offStr[32] = {};
-            if (ref.offset == 0) {
-                swprintf_s(offStr, L"+0x00 (Base)");
-            } else {
-                swprintf_s(offStr, L"+0x%02x", ref.offset);
-            }
-
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  0x%016llx    %-14s  %s\n",
-                static_cast<unsigned long long>(ref.refAddr),
-                offStr,
-                label.c_str());
-        }
-
-        // If pool state already suggests freed OR object header ref counts are suspect
-        if (pool.suspectFree || oh.refCountsSuspect) {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"\n  [!!] FREED object with %llu dangling pointer(s) -- STRONG UAF SIGNAL\n",
-                static_cast<unsigned long long>(refs.size()));
-            riskScore    += 50;
-            evidenceItems += 2;
-        } else {
-            // Live object referenced from nearby structures
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"\n  [+] Object has %llu active reference(s) from nearby kernel structures.\n",
-                static_cast<unsigned long long>(refs.size()));
-        }
-    }
-
-    // ── PHASE 5: Risk Report ─────────────────────────────────────────────────
-    // Clamp score
-    if (riskScore > 100) riskScore = 100;
-    if (riskScore < 0)   riskScore = 0;
-
-    LifetimeState state;
-    if      (riskScore >= 70) state = LifetimeState::Freed;
-    else if (riskScore >= 35) state = LifetimeState::Suspect;
-    else                      state = LifetimeState::Live;
-
-    // ASCII risk bar (40 chars)
-    constexpr int kBarW = 40;
-    wchar_t riskBar[kBarW + 1] = {};
-    int barFill = (riskScore * kBarW) / 100;
-    for (int i = 0; i < kBarW; i++) {
-        if (i < barFill) {
-            riskBar[i] = (riskScore >= 70) ? L'#' :
-                         (riskScore >= 35) ? L'=' : L'-';
-        } else {
-            riskBar[i] = L'.';
-        }
-    }
-    riskBar[kBarW] = L'\0';
-
-    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"\n"
-        L"================================================================\n"
-        L"  PHASE 5 -- UAF Risk Report\n"
-        L"================================================================\n"
-        L"\n"
-        L"  Object  : 0x%016llx\n"
-        L"  State   : %s\n"
-        L"  Score   : %d / 100   (evidence items: %d)\n"
-        L"  Risk    : [%s] %d%%\n"
-        L"\n",
-        static_cast<unsigned long long>(addr),
-        LifetimeStateName(state),
-        riskScore, evidenceItems,
-        riskBar, riskScore);
-
-    switch (state) {
-    case LifetimeState::Freed:
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  [!!!] HIGH RISK -- LIKELY USE-AFTER-FREE\n"
-            L"\n"
-            L"  Evidence:\n"
-            L"    - Pool header / free-list linkage indicate FREED state\n"
-            L"    - %llu dangling pointer(s) still reference this address\n"
-            L"    - Object content entropy / ref-counts are SUSPECT\n"
-            L"\n"
-            L"  WinDbg Breakpoint Recipe:\n"
-            L"    ba r8 0x%016llx   <- break on any READ of freed object\n"
-            L"    ba w8 0x%016llx   <- break on re-use/overwrite by allocator\n"
-            L"\n"
-            L"  Formal model at this address:\n"
-            L"    t_free < t_use  =>  UAF(O) proven\n"
-            L"    Lifetime(O) = [t_alloc, t_free)\n"
-            L"    t_use NOT IN Lifetime(O)  =>  USE-AFTER-FREE\n"
-            L"\n"
-            L"  Next Steps:\n"
-            L"    1. !structscan 0x%016llx 0x%lx   -- deep field analysis\n"
-            L"    2. Check dangling ref addresses above for caller context\n"
-            L"    3. kb / k to correlate with current call stack\n",
-            static_cast<unsigned long long>(refs.size()),
-            static_cast<unsigned long long>(addr),
-            static_cast<unsigned long long>(addr),
-            static_cast<unsigned long long>(addr),
-            static_cast<unsigned long>(objSize));
-        break;
-
-    case LifetimeState::Suspect:
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  [!]  MODERATE RISK -- AMBIGUOUS LIFETIME STATE\n"
-            L"\n"
-            L"  Some signals suggest UAF but evidence is not conclusive.\n"
-            L"\n"
-            L"  Next Steps:\n"
-            L"    1. Widen the search: !uaf %s 0x%lx 0x%lx\n"
-            L"    2. Inspect field detail: !structscan 0x%016llx 0x%lx\n"
-            L"    3. Check if address was previously freed: !pool 0x%016llx\n"
-            L"    4. Set a conditional bp on the object: ba r8 0x%016llx\n",
-            target,
-            static_cast<unsigned long>(objSize),
-            static_cast<unsigned long>(searchBytes * 4),
-            static_cast<unsigned long long>(addr),
-            static_cast<unsigned long>(objSize),
-            static_cast<unsigned long long>(addr),
-            static_cast<unsigned long long>(addr));
-        break;
-
-    default: // Live
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  [+]  LOW RISK -- Object appears LIVE\n"
-            L"\n"
-            L"  No strong UAF indicators found in scanned range.\n"
-            L"\n"
-            L"  If you suspect UAF at a specific call site:\n"
-            L"    - Set a bp BEFORE the suspected free: bp <free_site>\n"
-            L"    - Note the VA of the object at that point\n"
-            L"    - Then: !uaf <VA> 0x%lx 0x%lx  after free returns\n"
-            L"    - Compare the lifetime model: t_free < t_use\n",
-            static_cast<unsigned long>(objSize),
-            static_cast<unsigned long>(searchBytes));
-        break;
-    }
-
-    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"\n"
-        L"  UAF Lifetime Model:\n"
-        L"    ALLOC(O) -> LIVE(O) -> FREE(O) -> [REUSE(O)] -> USE(O)\n"
-        L"    Violation: USE(O) requires LIVE(O) -- t_use in [t_alloc, t_free)\n"
-        L"\n"
-        L"================================================================\n\n");
+    ExecutePhase5_RiskReport(ctx, riskScore, evidenceItems, refs);
 
     return S_OK;
 }

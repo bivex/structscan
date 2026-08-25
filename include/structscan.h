@@ -44,6 +44,28 @@ constexpr uint32_t MAKE_TAG(char a, char b, char c, char d) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Common Context & Parameter Objects
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct DebugContext {
+    IDebugControl4*    ctrl{nullptr};
+    IDebugSymbols4*    sym{nullptr};
+    IDebugDataSpaces4* ds{nullptr};
+};
+
+struct ModuleInfo {
+    ULONG64 base{0};
+    ULONG   size{0};
+    wchar_t name[128]{};
+};
+
+struct UafScanParams {
+    const wchar_t* target{nullptr};
+    ULONG          objSize{0x200};
+    ULONG          searchBytes{0x8000};
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Field Type Classification System
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -60,19 +82,21 @@ enum class FieldType : uint8_t {
     Padding       = 9,
 };
 
-static const wchar_t* FieldTypeName(FieldType t) {
-    switch (t) {
-        case FieldType::Pointer:       return L"Pointer";
-        case FieldType::ListEntry:     return L"LIST_ENTRY";
-        case FieldType::UnicodeString: return L"UNICODE_STRING";
-        case FieldType::AsciiString:   return L"ASCII";
-        case FieldType::PoolTag:       return L"PoolTag";
-        case FieldType::Integer:       return L"Integer";
-        case FieldType::Flags:         return L"Flags";
-        case FieldType::Handle:        return L"Handle";
-        case FieldType::Padding:       return L"Padding";
-        default:                       return L"Unknown";
-    }
+static inline const wchar_t* FieldTypeName(FieldType t) {
+    static constexpr const wchar_t* kNames[] = {
+        L"Unknown",        // 0: Unknown
+        L"Pointer",        // 1: Pointer
+        L"LIST_ENTRY",     // 2: ListEntry
+        L"UNICODE_STRING", // 3: UnicodeString
+        L"ASCII",          // 4: AsciiString
+        L"PoolTag",        // 5: PoolTag
+        L"Integer",        // 6: Integer
+        L"Flags",          // 7: Flags
+        L"Handle",         // 8: Handle
+        L"Padding",        // 9: Padding
+    };
+    auto idx = static_cast<size_t>(t);
+    return (idx < sizeof(kNames) / sizeof(kNames[0])) ? kNames[idx] : L"Unknown";
 }
 
 struct FieldAnalysis {
@@ -227,41 +251,47 @@ public:
     );
 };
 
-class OutputCaptureCallback : public IDebugOutputCallbacks2 {
+// ─────────────────────────────────────────────────────────────────────────────
+// Output Capture System (Role Segregation: Storage Sink & RAII Interceptor)
+// ─────────────────────────────────────────────────────────────────────────────
+
+class IOutputSink {
+public:
+    virtual ~IOutputSink() = default;
+    virtual void Append(const wchar_t* text) = 0;
+    virtual void Clear() = 0;
+    virtual const std::wstring& GetText() const = 0;
+};
+
+class StringOutputSink : public IOutputSink {
 private:
-    ULONG m_refCount{1};
-    std::wstring m_capturedOutput;
-    IDebugClient* m_client{nullptr};
-    PDEBUG_OUTPUT_CALLBACKS m_prevCallback{nullptr};
+    std::wstring m_buffer;
+public:
+    void Append(const wchar_t* text) override {
+        if (text) m_buffer += text;
+    }
+    void Clear() override { m_buffer.clear(); }
+    const std::wstring& GetText() const override { return m_buffer; }
+};
+
+class DebugOutputCaptureSink : public IDebugOutputCallbacks2 {
+private:
+    ULONG        m_refCount{1};
+    IOutputSink* m_sink{nullptr};
 
 public:
-    OutputCaptureCallback() = default;
-
-    HRESULT Initialize(IDebugClient* client) {
-        m_client = client;
-        if (!m_client) return E_INVALIDARG;
-        HRESULT hr = m_client->GetOutputCallbacks(&m_prevCallback);
-        if (FAILED(hr)) m_prevCallback = nullptr;
-        return m_client->SetOutputCallbacks(reinterpret_cast<PDEBUG_OUTPUT_CALLBACKS>(this));
-    }
-
-    void Restore() {
-        if (m_client) m_client->SetOutputCallbacks(m_prevCallback);
-    }
-
-    ~OutputCaptureCallback() { Restore(); }
-
-    void Clear() { m_capturedOutput.clear(); }
-    const std::wstring& GetOutput() const { return m_capturedOutput; }
+    explicit DebugOutputCaptureSink(IOutputSink* sink) : m_sink(sink) {}
 
     STDMETHODIMP QueryInterface(REFIID InterfaceId, PVOID* Interface) override {
         if (InterfaceId == __uuidof(IUnknown) ||
             InterfaceId == __uuidof(IDebugOutputCallbacks) ||
             InterfaceId == __uuidof(IDebugOutputCallbacks2)) {
             *Interface = static_cast<IDebugOutputCallbacks2*>(this);
-            AddRef(); return S_OK;
+            AddRef();
+            return S_OK;
         }
-        *Interface = nullptr; return E_NOINTERFACE;
+        *Interface = nullptr;
+        return E_NOINTERFACE;
     }
     STDMETHODIMP_(ULONG) AddRef() override { return ++m_refCount; }
     STDMETHODIMP_(ULONG) Release() override {
@@ -270,12 +300,12 @@ public:
         return c;
     }
     STDMETHODIMP Output(ULONG, PCSTR Text) override {
-        if (Text) {
+        if (Text && m_sink) {
             int n = MultiByteToWideChar(CP_ACP, 0, Text, -1, nullptr, 0);
             if (n > 0) {
                 std::vector<wchar_t> wb(n);
                 MultiByteToWideChar(CP_ACP, 0, Text, -1, wb.data(), n);
-                m_capturedOutput += wb.data();
+                m_sink->Append(wb.data());
             }
         }
         return S_OK;
@@ -285,63 +315,91 @@ public:
         return S_OK;
     }
     STDMETHODIMP Output2(ULONG, ULONG, ULONG64, PCWSTR Text) override {
-        if (Text) m_capturedOutput += Text;
+        if (Text && m_sink) m_sink->Append(Text);
         return S_OK;
     }
 };
 
+class ScopedOutputCapture {
+private:
+    IDebugClient*           m_client{nullptr};
+    PDEBUG_OUTPUT_CALLBACKS m_prevCallback{nullptr};
+    DebugOutputCaptureSink* m_captureSink{nullptr};
+    StringOutputSink        m_storage;
+
+public:
+    ScopedOutputCapture() = default;
+    ~ScopedOutputCapture() { Restore(); }
+
+    HRESULT Initialize(IDebugClient* client) {
+        if (!client) return E_INVALIDARG;
+        m_client = client;
+        HRESULT hr = m_client->GetOutputCallbacks(&m_prevCallback);
+        if (FAILED(hr)) m_prevCallback = nullptr;
+
+        m_captureSink = new DebugOutputCaptureSink(&m_storage);
+        return m_client->SetOutputCallbacks(m_captureSink);
+    }
+
+    void Restore() {
+        if (m_client) {
+            m_client->SetOutputCallbacks(m_prevCallback);
+            m_client = nullptr;
+        }
+        if (m_captureSink) {
+            m_captureSink->Release();
+            m_captureSink = nullptr;
+        }
+    }
+
+    void Clear() { m_storage.Clear(); }
+    const std::wstring& GetOutput() const { return m_storage.GetText(); }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Target Resolution & Formatting Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 ULONG64 ResolveTarget(
-    IDebugControl4*  ctrl,
-    IDebugSymbols4*  sym,
-    const wchar_t*   token,
-    ULONG64*         outModBase = nullptr,
-    wchar_t*         outModName = nullptr,
-    size_t           modNameCch = 0,
-    ULONG*           outModSize = nullptr
+    IDebugSymbols4* sym,
+    const wchar_t*  token,
+    ModuleInfo*     outModInfo = nullptr
 );
 
 std::wstring ConfBar(double conf, int width = 8);
 void PrintField(IDebugControl4* ctrl, const FieldAnalysis& fa);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine Execution APIs
+// ─────────────────────────────────────────────────────────────────────────────
+
 HRESULT DoSingleScan(
-    IDebugControl4*    ctrl,
-    IDebugSymbols4*    sym,
-    IDebugDataSpaces4* ds,
-    const wchar_t*     target,
-    ULONG              scanWindow
+    const DebugContext& ctx,
+    const wchar_t*      target,
+    ULONG               scanWindow
 );
 
 HRESULT DoListCrossRef(
-    IDebugControl4*    ctrl,
-    IDebugSymbols4*    sym,
-    IDebugDataSpaces4* ds,
-    const wchar_t*     target,
-    ULONG              scanWindow
+    const DebugContext& ctx,
+    const wchar_t*      target,
+    ULONG               scanWindow
 );
 
 HRESULT DoEmitHeader(
-    IDebugControl4*    ctrl,
-    IDebugSymbols4*    sym,
-    IDebugDataSpaces4* ds,
-    const wchar_t*     target,
-    ULONG              scanWindow
+    const DebugContext& ctx,
+    const wchar_t*      target,
+    ULONG               scanWindow
 );
 
 HRESULT DoEntropyMap(
-    IDebugControl4*    ctrl,
-    IDebugDataSpaces4* ds,
-    const wchar_t*     target,
-    IDebugSymbols4*    sym,
-    ULONG              scanWindow
+    const DebugContext& ctx,
+    const wchar_t*      target,
+    ULONG               scanWindow
 );
 
 HRESULT DoUafAnalysis(
-    IDebugControl4*    ctrl,
-    IDebugSymbols4*    sym,
-    IDebugDataSpaces4* ds,
-    const wchar_t*     target,
-    ULONG              objSize,
-    ULONG              searchBytes
+    const DebugContext&  ctx,
+    const UafScanParams& params
 );
 
 #endif // STRUCTSCAN_H

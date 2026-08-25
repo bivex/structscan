@@ -18,191 +18,156 @@ __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Ver
 
 __declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void) {}
 
-__declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args) {
-    if (!Client) return E_INVALIDARG;
+struct ScopedDebugInterfaces {
+    DebugContext ctx;
 
-    IDebugControl4*    ctrl = nullptr;
-    IDebugSymbols4*    sym  = nullptr;
-    IDebugDataSpaces4* ds   = nullptr;
-    HRESULT hr = S_OK;
+    bool Acquire(IDebugClient* client) {
+        if (!client) return false;
+        if (FAILED(client->QueryInterface(__uuidof(IDebugControl4),    reinterpret_cast<void**>(&ctx.ctrl)))) return false;
+        if (FAILED(client->QueryInterface(__uuidof(IDebugSymbols4),    reinterpret_cast<void**>(&ctx.sym))))  return false;
+        if (FAILED(client->QueryInterface(__uuidof(IDebugDataSpaces4), reinterpret_cast<void**>(&ctx.ds))))   return false;
+        return true;
+    }
 
-    if (FAILED(Client->QueryInterface(__uuidof(IDebugControl4),    (void**)&ctrl))) return E_FAIL;
-    if (FAILED(Client->QueryInterface(__uuidof(IDebugSymbols4),    (void**)&sym)))  { ctrl->Release(); return E_FAIL; }
-    if (FAILED(Client->QueryInterface(__uuidof(IDebugDataSpaces4), (void**)&ds)))   { sym->Release(); ctrl->Release(); return E_FAIL; }
+    ~ScopedDebugInterfaces() {
+        if (ctx.ds)   { ctx.ds->Release();   ctx.ds = nullptr; }
+        if (ctx.sym)  { ctx.sym->Release();  ctx.sym = nullptr; }
+        if (ctx.ctrl) { ctx.ctrl->Release(); ctx.ctrl = nullptr; }
+    }
+};
 
+struct CommandArgs {
+    wchar_t tok0[128]{};
+    wchar_t tok1[128]{};
+    wchar_t tok2[128]{};
+    int     count{0};
+};
+
+static CommandArgs ParseCommandArgs(PCSTR args) {
+    CommandArgs parsed{};
     wchar_t wargs[512] = {};
-    if (Args && *Args) {
+    if (args && *args) {
         size_t c = 0;
-        mbstowcs_s(&c, wargs, _countof(wargs), Args, _TRUNCATE);
+        mbstowcs_s(&c, wargs, _countof(wargs), args, _TRUNCATE);
     }
-
-    wchar_t tok0[128] = {}, tok1[128] = {}, tok2[128] = {};
-    int tokenCount = swscanf_s(wargs, L"%127s %127s %127s",
-        tok0, (unsigned)_countof(tok0),
-        tok1, (unsigned)_countof(tok1),
-        tok2, (unsigned)_countof(tok2));
-
-    if (tokenCount <= 0 || wcslen(tok0) == 0) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"==============================================================\n");
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L" StructScan v%d.%d - Intelligent Structure Reconstruction Engine\n",
-            EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"==============================================================\n\n");
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L" USAGE:\n"
-            L"   !structscan <sym|addr> [size]          - Bayesian single-instance scan\n"
-            L"   !structscan list <sym|addr> [size]     - Multi-instance cross-reference\n"
-            L"   !structscan emit <sym|addr> [size]     - Synthesize C/C++ struct header\n"
-            L"   !structscan entropy <sym|addr> [size]  - Shannon entropy heatmap\n"
-            L"   !structscan unload                     - Unload hint\n\n"
-            L" EXAMPLES:\n"
-            L"   !structscan nt!PsInitialSystemProcess 0x400\n"
-            L"   !structscan emit nt!KdDebuggerDataBlock 0x400\n"
-            L"   !structscan list nt!PsActiveProcessHead 0x800\n"
-            L"   !structscan entropy fffff802ac809ab0 0x200\n\n");
-        goto Exit;
-    }
-
-    if (_wcsicmp(tok0, L"unload") == 0) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"[+] Run: .unload structscan\n");
-        goto Exit;
-    }
-
-    if (_wcsicmp(tok0, L"emit") == 0) {
-        if (wcslen(tok1) == 0) {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan emit <sym|addr> [size]\n");
-            hr = E_INVALIDARG; goto Exit;
-        }
-        ULONG window = (wcslen(tok2) > 0) ? static_cast<ULONG>(wcstoul(tok2, nullptr, 16)) : 0x400;
-        if (!window) window = 0x400;
-        hr = DoEmitHeader(ctrl, sym, ds, tok1, window);
-        goto Exit;
-    }
-
-    if (_wcsicmp(tok0, L"entropy") == 0) {
-        if (wcslen(tok1) == 0) {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan entropy <sym|addr> [size]\n");
-            hr = E_INVALIDARG; goto Exit;
-        }
-        ULONG window = (wcslen(tok2) > 0) ? static_cast<ULONG>(wcstoul(tok2, nullptr, 16)) : 0x200;
-        if (!window) window = 0x200;
-        hr = DoEntropyMap(ctrl, ds, tok1, sym, window);
-        goto Exit;
-    }
-
-    if (_wcsicmp(tok0, L"list") == 0) {
-        if (wcslen(tok1) == 0) {
-            ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan list <sym|addr> [size]\n");
-            hr = E_INVALIDARG; goto Exit;
-        }
-        ULONG window = (wcslen(tok2) > 0) ? static_cast<ULONG>(wcstoul(tok2, nullptr, 16)) : 0x400;
-        if (!window) window = 0x400;
-        hr = DoListCrossRef(ctrl, sym, ds, tok1, window);
-        goto Exit;
-    }
-
-    {
-        ULONG window = (wcslen(tok1) > 0) ? static_cast<ULONG>(wcstoul(tok1, nullptr, 16)) : 0x400;
-        if (!window) window = 0x400;
-        hr = DoSingleScan(ctrl, sym, ds, tok0, window);
-    }
-
-Exit:
-    if (ds)   ds->Release();
-    if (sym)  sym->Release();
-    if (ctrl) ctrl->Release();
-    return hr;
+    parsed.count = swscanf_s(wargs, L"%127s %127s %127s",
+        parsed.tok0, static_cast<unsigned>(_countof(parsed.tok0)),
+        parsed.tok1, static_cast<unsigned>(_countof(parsed.tok1)),
+        parsed.tok2, static_cast<unsigned>(_countof(parsed.tok2)));
+    return parsed;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// !uaf <sym|addr> [objsize] [searchbytes]
-//
-//   objsize     — how many bytes of the suspected object to analyze
-//                 default: 0x200
-//   searchbytes — kernel VA range (centered on object) to scan for dangling
-//                 back-pointers.  default: 0x8000 (32 KB)
-//
-// Examples:
-//   !uaf nt!PsInitialSystemProcess 0x480
-//   !uaf ffff8001`234abcd0 0x300 0x20000
-//   !uaf win32k!gpdi
-// ─────────────────────────────────────────────────────────────────────────────
+static ULONG ParseHexWithDefault(const wchar_t* tok, ULONG defaultValue) {
+    if (!tok || wcslen(tok) == 0) return defaultValue;
+    ULONG val = static_cast<ULONG>(wcstoul(tok, nullptr, 16));
+    return (val > 0) ? val : defaultValue;
+}
+
+static void PrintStructscanUsage(IDebugControl4* ctrl) {
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"==============================================================\n"
+        L" StructScan v%d.%d - Intelligent Structure Reconstruction Engine\n"
+        L"==============================================================\n\n"
+        L" USAGE:\n"
+        L"   !structscan <sym|addr> [size]          - Bayesian single-instance scan\n"
+        L"   !structscan list <sym|addr> [size]     - Multi-instance cross-reference\n"
+        L"   !structscan emit <sym|addr> [size]     - Synthesize C/C++ struct header\n"
+        L"   !structscan entropy <sym|addr> [size]  - Shannon entropy heatmap\n"
+        L"   !structscan unload                     - Unload hint\n\n"
+        L" EXAMPLES:\n"
+        L"   !structscan nt!PsInitialSystemProcess 0x400\n"
+        L"   !structscan emit nt!KdDebuggerDataBlock 0x400\n"
+        L"   !structscan list nt!PsActiveProcessHead 0x800\n"
+        L"   !structscan entropy fffff802ac809ab0 0x200\n\n",
+        EXTENSION_VERSION_MAJOR, EXTENSION_VERSION_MINOR);
+}
+
+static HRESULT DispatchStructScanCommand(const DebugContext& ctx, const CommandArgs& args) {
+    if (args.count <= 0 || wcslen(args.tok0) == 0) {
+        PrintStructscanUsage(ctx.ctrl);
+        return S_OK;
+    }
+
+    if (_wcsicmp(args.tok0, L"unload") == 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[+] Run: .unload structscan\n");
+        return S_OK;
+    }
+
+    if (_wcsicmp(args.tok0, L"emit") == 0) {
+        if (wcslen(args.tok1) == 0) {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan emit <sym|addr> [size]\n");
+            return E_INVALIDARG;
+        }
+        return DoEmitHeader(ctx, args.tok1, ParseHexWithDefault(args.tok2, 0x400));
+    }
+
+    if (_wcsicmp(args.tok0, L"entropy") == 0) {
+        if (wcslen(args.tok1) == 0) {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan entropy <sym|addr> [size]\n");
+            return E_INVALIDARG;
+        }
+        return DoEntropyMap(ctx, args.tok1, ParseHexWithDefault(args.tok2, 0x200));
+    }
+
+    if (_wcsicmp(args.tok0, L"list") == 0) {
+        if (wcslen(args.tok1) == 0) {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"[-] Usage: !structscan list <sym|addr> [size]\n");
+            return E_INVALIDARG;
+        }
+        return DoListCrossRef(ctx, args.tok1, ParseHexWithDefault(args.tok2, 0x400));
+    }
+
+    return DoSingleScan(ctx, args.tok0, ParseHexWithDefault(args.tok1, 0x400));
+}
+
+__declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args) {
+    ScopedDebugInterfaces dbg;
+    if (!dbg.Acquire(Client)) return E_FAIL;
+    CommandArgs parsed = ParseCommandArgs(Args);
+    return DispatchStructScanCommand(dbg.ctx, parsed);
+}
+
+static void PrintUafUsage(IDebugControl4* ctrl) {
+    ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"================================================================\n"
+        L"  StructScan !uaf v4.0  --  Use-After-Free Lifetime Analyzer\n"
+        L"================================================================\n\n"
+        L"  USAGE:\n"
+        L"    !uaf <sym|addr> [objsize] [searchbytes]\n\n"
+        L"  PARAMETERS:\n"
+        L"    sym|addr    - Symbol name (e.g. nt!PsInitialSystemProcess)\n"
+        L"                  or raw virtual address (hex, e.g. ffff8001`1234abcd)\n"
+        L"    objsize     - Object size to analyze in bytes  [default: 0x200]\n"
+        L"    searchbytes - Kernel VA range to scan for dangling refs [default: 0x8000]\n\n"
+        L"  EXAMPLES:\n"
+        L"    !uaf nt!PsInitialSystemProcess 0x480\n"
+        L"    !uaf ffff8001`234abcd0 0x300 0x20000\n"
+        L"    !uaf win32k!gpdi\n\n"
+        L"  PHASES:\n"
+        L"    1. Pool Header    -- PoolType, tag validity, free-list linkage\n"
+        L"    2. OBJECT_HEADER  -- PointerCount / HandleCount ref-counts\n"
+        L"    3. Content        -- Shannon entropy, Bayesian field snapshot\n"
+        L"    4. Dangling Refs  -- reverse pointer scan in searchbytes range\n"
+        L"    5. Risk Report    -- weighted score + WinDbg BP recipe\n\n"
+        L"  FORMAL MODEL:\n"
+        L"    ALLOC(O) -> LIVE(O) -> FREE(O) -> [REUSE] -> USE(O)\n"
+        L"    Invariant: USE(O) requires t_use in [t_alloc, t_free)\n\n");
+}
+
 __declspec(dllexport) HRESULT CALLBACK uaf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args) {
-    if (!Client) return E_INVALIDARG;
+    ScopedDebugInterfaces dbg;
+    if (!dbg.Acquire(Client)) return E_FAIL;
 
-    IDebugControl4*    ctrl = nullptr;
-    IDebugSymbols4*    sym  = nullptr;
-    IDebugDataSpaces4* ds   = nullptr;
-
-    if (FAILED(Client->QueryInterface(__uuidof(IDebugControl4),    (void**)&ctrl))) return E_FAIL;
-    if (FAILED(Client->QueryInterface(__uuidof(IDebugSymbols4),    (void**)&sym)))  { ctrl->Release(); return E_FAIL; }
-    if (FAILED(Client->QueryInterface(__uuidof(IDebugDataSpaces4), (void**)&ds)))   { sym->Release(); ctrl->Release(); return E_FAIL; }
-
-    wchar_t wargs[512] = {};
-    if (Args && *Args) {
-        size_t c = 0;
-        mbstowcs_s(&c, wargs, _countof(wargs), Args, _TRUNCATE);
+    CommandArgs parsed = ParseCommandArgs(Args);
+    if (parsed.count <= 0 || wcslen(parsed.tok0) == 0) {
+        PrintUafUsage(dbg.ctx.ctrl);
+        return S_OK;
     }
 
-    wchar_t tok0[128] = {}, tok1[128] = {}, tok2[128] = {};
-    int tokenCount = swscanf_s(wargs, L"%127s %127s %127s",
-        tok0, (unsigned)_countof(tok0),
-        tok1, (unsigned)_countof(tok1),
-        tok2, (unsigned)_countof(tok2));
+    UafScanParams params{};
+    params.target      = parsed.tok0;
+    params.objSize     = ParseHexWithDefault(parsed.tok1, 0x200);
+    params.searchBytes = ParseHexWithDefault(parsed.tok2, 0x8000);
 
-    HRESULT hr = S_OK;
-
-    // No arguments: print usage
-    if (tokenCount <= 0 || wcslen(tok0) == 0) {
-        ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"================================================================\n"
-            L"  StructScan !uaf v4.0  --  Use-After-Free Lifetime Analyzer\n"
-            L"================================================================\n\n"
-            L"  USAGE:\n"
-            L"    !uaf <sym|addr> [objsize] [searchbytes]\n\n"
-            L"  PARAMETERS:\n"
-            L"    sym|addr    - Symbol name (e.g. nt!PsInitialSystemProcess)\n"
-            L"                  or raw virtual address (hex, e.g. ffff8001`1234abcd)\n"
-            L"    objsize     - Object size to analyze in bytes  [default: 0x200]\n"
-            L"    searchbytes - Kernel VA range to scan for dangling refs [default: 0x8000]\n\n"
-            L"  EXAMPLES:\n"
-            L"    !uaf nt!PsInitialSystemProcess 0x480\n"
-            L"    !uaf ffff8001`234abcd0 0x300 0x20000\n"
-            L"    !uaf win32k!gpdi\n\n"
-            L"  PHASES:\n"
-            L"    1. Pool Header    -- PoolType, tag validity, free-list linkage\n"
-            L"    2. OBJECT_HEADER  -- PointerCount / HandleCount ref-counts\n"
-            L"    3. Content        -- Shannon entropy, Bayesian field snapshot\n"
-            L"    4. Dangling Refs  -- reverse pointer scan in searchbytes range\n"
-            L"    5. Risk Report    -- weighted score + WinDbg BP recipe\n\n"
-            L"  FORMAL MODEL:\n"
-            L"    ALLOC(O) -> LIVE(O) -> FREE(O) -> [REUSE] -> USE(O)\n"
-            L"    Invariant: USE(O) requires t_use in [t_alloc, t_free)\n\n");
-        goto Exit;
-    }
-
-    {
-        // objsize: token1, hex; default 0x200
-        ULONG objSize = (wcslen(tok1) > 0)
-                        ? static_cast<ULONG>(wcstoul(tok1, nullptr, 16))
-                        : 0x200u;
-        if (!objSize) objSize = 0x200u;
-
-        // searchbytes: token2, hex; default 0x8000
-        ULONG searchBytes = (wcslen(tok2) > 0)
-                            ? static_cast<ULONG>(wcstoul(tok2, nullptr, 16))
-                            : 0x8000u;
-        if (!searchBytes) searchBytes = 0x8000u;
-
-        hr = DoUafAnalysis(ctrl, sym, ds, tok0, objSize, searchBytes);
-    }
-
-Exit:
-    if (ds)   ds->Release();
-    if (sym)  sym->Release();
-    if (ctrl) ctrl->Release();
-    return hr;
+    return DoUafAnalysis(dbg.ctx, params);
 }
