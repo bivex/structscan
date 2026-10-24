@@ -7,6 +7,33 @@
 #include <cwchar>
 #include <cstdlib>
 
+static bool ParseHex64(const wchar_t* s, ULONG64* outVal) {
+    if (!s || !outVal) return false;
+    while (*s == L' ' || *s == L'\t') s++;
+    if (!*s) return false;
+    if (s[0] == L'0' && (s[1] == L'x' || s[1] == L'X')) s += 2;
+    if (!*s) return false;
+    ULONG64 val = 0;
+    int digits = 0;
+    while (*s) {
+        if (*s == (wchar_t)0x60) { s++; continue; }
+        wchar_t c = *s++;
+        uint8_t d = 0;
+        if (c >= L'0' && c <= L'9') d = c - L'0';
+        else if (c >= L'a' && c <= L'f') d = c - L'a' + 10;
+        else if (c >= L'A' && c <= L'F') d = c - L'A' + 10;
+        else break;
+        val = (val << 4) | d;
+        digits++;
+    }
+    if (digits == 0) return false;
+    if (digits <= 8 && (val & 0x80000000ULL) != 0 && (val & 0xFFFFFFFF00000000ULL) == 0) {
+        val |= 0xFFFFF80100000000ULL;
+    }
+    *outVal = val;
+    return true;
+}
+
 ULONG64 ResolveTarget(
     IDebugSymbols4* sym,
     const wchar_t*  token,
@@ -14,26 +41,17 @@ ULONG64 ResolveTarget(
 ) {
     if (!token || !sym) return 0;
 
-    // Clean backtick (`) which WinDbg uses in 64-bit addresses (e.g. fffff801`9de361c0)
-    wchar_t cleanToken[128] = {};
-    size_t ci = 0;
-    for (size_t i = 0; token[i] && ci + 1 < _countof(cleanToken); ++i) {
-        if (token[i] != L'`') {
-            cleanToken[ci++] = token[i];
-        }
-    }
-    cleanToken[ci] = L'\0';
-    wchar_t* end = nullptr;
-    ULONG64 addr = std::wcstoull(cleanToken, &end, 16);
-    if (end != cleanToken && *end == L'\0' && addr >= 0x10000) {
-        // If truncated 32-bit kernel pointer on 64-bit target, restore high 32 bits from kernel base
-        if ((addr & 0xFFFFFFFF00000000ULL) == 0 && (addr & 0x80000000ULL) != 0) {
-            ULONG64 ntBase = 0;
-            if (SUCCEEDED(sym->GetModuleByModuleNameWide(L"nt", 0, nullptr, &ntBase)) && ntBase > 0xFFFFFFFF00000000ULL) {
-                addr |= (ntBase & 0xFFFFFFFF00000000ULL);
+    ULONG64 hexAddr = 0;
+    if (ParseHex64(token, &hexAddr) && hexAddr >= 0x10000) {
+        if ((hexAddr & 0xFFFFFFFF00000000ULL) == 0 && (hexAddr & 0x80000000ULL) != 0) {
+            ULONG64 kbase = 0;
+            if (SUCCEEDED(sym->GetModuleByModuleNameWide(L"nt", 0, nullptr, &kbase)) && kbase > 0xFFFFFFFF00000000ULL) {
+                hexAddr |= (kbase & 0xFFFFFFFF00000000ULL);
+            } else {
+                hexAddr |= 0xFFFFF80000000000ULL;
             }
         }
-        return addr;
+        return hexAddr;
     }
     wchar_t modName[128] = {};
     const wchar_t* bang = wcschr(token, L'!');

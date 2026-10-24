@@ -52,6 +52,48 @@ static bool SymbolExists(IDebugSymbols4* sym, const wchar_t* name) {
     return SUCCEEDED(sym->GetOffsetByNameWide(name, &offset)) && offset != 0;
 }
 
+static bool ParseHex64(const wchar_t* s, ULONG64* outVal) {
+    if (!s || !outVal) return false;
+    while (*s == L' ' || *s == L'\t') s++;
+    if (!*s) return false;
+    if (s[0] == L'0' && (s[1] == L'x' || s[1] == L'X')) s += 2;
+    if (!*s) return false;
+    ULONG64 val = 0;
+    int digits = 0;
+    while (*s) {
+        if (*s == (wchar_t)0x60) { s++; continue; }
+        wchar_t c = *s++;
+        uint8_t d = 0;
+        if (c >= L'0' && c <= L'9') d = c - L'0';
+        else if (c >= L'a' && c <= L'f') d = c - L'a' + 10;
+        else if (c >= L'A' && c <= L'F') d = c - L'A' + 10;
+        else break;
+        val = (val << 4) | d;
+        digits++;
+    }
+    if (digits == 0) return false;
+    if (digits <= 8 && (val & 0x80000000ULL) != 0 && (val & 0xFFFFFFFF00000000ULL) == 0) {
+        val |= 0xFFFFF80100000000ULL;
+    }
+    *outVal = val;
+    return true;
+}
+
+static ULONG64 ResolveAddressOrSymbol(IDebugSymbols4* sym, const wchar_t* token) {
+    if (!token || !*token) return 0;
+    ULONG64 addr = 0;
+    if (ParseHex64(token, &addr)) {
+        if ((addr & 0xFFFFFFFF00000000ULL) == 0 && (addr & 0x80000000ULL) != 0) {
+            addr |= 0xFFFFF80100000000ULL;
+        }
+        return addr;
+    }
+    addr = ResolveTarget(sym, token);
+    if ((addr & 0xFFFFFFFF00000000ULL) == 0 && (addr & 0x80000000ULL) != 0) {
+        addr |= 0xFFFFF80100000000ULL;
+    }
+    return addr;
+}
 // Format a VA as a wide hex string usable as a target by ResolveTarget
 static void FmtAddr(wchar_t* buf, size_t bufsz, ULONG64 addr) {
     swprintf_s(buf, bufsz, L"0x%016llx", static_cast<unsigned long long>(addr));
@@ -182,10 +224,9 @@ static HRESULT RunPhasePe(const DebugContext& ctx, const wchar_t* arg) {
 
     ULONG64 baseAddr = 0;
     if (arg && wcslen(arg) > 0) {
-        // Try module name resolution first
         ULONG modIdx = 0;
         if (FAILED(ctx.sym->GetModuleByModuleNameWide(arg, 0, &modIdx, &baseAddr)) || baseAddr == 0) {
-            baseAddr = ResolveTarget(ctx.sym, arg);
+            baseAddr = ResolveAddressOrSymbol(ctx.sym, arg);
         }
     } else {
         // Default: find module of current IP
@@ -500,7 +541,7 @@ static HRESULT RunPhaseMap(const DebugContext& ctx, const wchar_t* arg, const wc
     if (arg && wcslen(arg) > 0) {
         ULONG modIdx = 0;
         if (FAILED(ctx.sym->GetModuleByModuleNameWide(arg, 0, &modIdx, &baseAddr)) || baseAddr == 0) {
-            baseAddr = ResolveTarget(ctx.sym, arg);
+            baseAddr = ResolveAddressOrSymbol(ctx.sym, arg);
         }
     } else {
         ULONG64 curIp = 0;
@@ -653,8 +694,8 @@ static HRESULT RunPhaseEdge(const DebugContext& ctx, const wchar_t* srcArg, cons
         return E_INVALIDARG;
     }
 
-    const ULONG64 srcAddr = ResolveTarget(ctx.sym, srcArg);
-    const ULONG64 dstAddr = ResolveTarget(ctx.sym, dstArg);
+    const ULONG64 srcAddr = ResolveAddressOrSymbol(ctx.sym, srcArg);
+    const ULONG64 dstAddr = ResolveAddressOrSymbol(ctx.sym, dstArg);
 
     if (srcAddr == 0 || dstAddr == 0) {
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
@@ -739,7 +780,7 @@ static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const 
     std::wstring targetLabel;
 
     if (arg && wcslen(arg) > 0) {
-        targetAddr = ResolveTarget(ctx.sym, arg);
+        targetAddr = ResolveAddressOrSymbol(ctx.sym, arg);
         if (targetAddr == 0) {
             ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
                 L"[-] Cannot resolve target: %s\n", arg);
@@ -1117,7 +1158,7 @@ static HRESULT RunPhaseWatch(const DebugContext& ctx, const wchar_t* arg) {
     }
 
     ModuleInfo modInfo{};
-    const ULONG64 addr = ResolveTarget(ctx.sym, arg, &modInfo);
+    const ULONG64 addr = ResolveAddressOrSymbol(ctx.sym, arg);
     if (addr == 0) {
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"\n[-] Cannot resolve: %s\n", arg);
