@@ -45,12 +45,14 @@ Comprehensive execution-flow and branch analyzer for Windows kernel and user-mod
 
 **Commands:**
 ```text
-0: kd> !cft trace [sym|addr] [count]   <- ARM / x64 branch transfer tracer
-0: kd> !cft snap                       <- Live snapshot: PC/RIP + regs + disasm + stack + entropy
-0: kd> !cft watch <sym|addr>           <- Hardware exec BP + prologue scan + entropy
-0: kd> !cft                            <- Automated 6-phase structural analysis
+0: kd> !cft pe [module|addr]          <- PE header, sections, CFG & entry point analyzer
+0: kd> !cft map [module|addr] [max]   <- Control-flow graph potential edges discovery
+0: kd> !cft edge <src> <dst>          <- Inspect a specific control transfer transition
+0: kd> !cft trace [sym|addr] [count]  <- ARM / x64 dynamic branch transfer tracer
+0: kd> !cft snap                      <- Live snapshot: PC/RIP + regs + disasm + stack + entropy
+0: kd> !cft watch <sym|addr>          <- Hardware exec BP + prologue scan + entropy
+0: kd> !cft                           <- Automated 6-phase structural analysis
 ```
-
 **Features & Capabilities:**
 - **ARM64 (AArch64) Branch Decoder**: Decodes and classifies all transfer instructions:
   - Direct Calls: `bl` (computes target address `PC + imm26*4` and resolves symbols)

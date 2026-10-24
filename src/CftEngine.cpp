@@ -4,7 +4,10 @@
  *
  * Subcommands:
  *   !cft                       — all structural phases + live snapshot
- *   !cft trace [sym|addr] [N]  — ARM64 / x64 Control Flow Transfer (CFT) branch tracer
+ *   !cft pe [module|addr]      — PE header, sections, CFG & entry point analyzer
+ *   !cft map [module|addr] [N] — Control Flow Graph (CFG) potential transfer map
+ *   !cft edge <src> <dst>      — Deep inspection of a specific control transfer edge
+ *   !cft trace [sym|addr] [N]  — ARM64 / x64 dynamic branch tracer
  *   !cft snap                  — live snapshot: PC/RIP + disasm + regs + stack + entropy
  *   !cft watch <sym|addr>      — Bayesian scan target + set hardware exec BP
  *   !cft trap                  — Phase 1: KTRAP_FRAME / KTHREAD C/C++ header
@@ -17,6 +20,7 @@
 #include "../include/structscan.h"
 #include <cwchar>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include <string>
 
@@ -98,6 +102,220 @@ static bool QueryRegisterValue(IDebugRegisters2* regs, int regIdx, ULONG64* outV
         }
     }
     return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PE Structure Parser & Definitions
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct PeParsedInfo {
+    ULONG64 baseAddr{0};
+    ULONG   sizeOfImage{0};
+    ULONG   entryPointRVA{0};
+    ULONG64 entryPointVA{0};
+    WORD    machine{0};
+    WORD    numberOfSections{0};
+    WORD    dllCharacteristics{0};
+    ULONG   sizeOfCode{0};
+    ULONG   baseOfCode{0};
+    std::wstring moduleName;
+    std::vector<IMAGE_SECTION_HEADER> sections;
+};
+
+static bool ReadPeModuleHeader(const DebugContext& ctx, ULONG64 baseAddr, PeParsedInfo& out) {
+    if (baseAddr == 0) return false;
+
+    IMAGE_DOS_HEADER dos{};
+    ULONG rd = 0;
+    if (FAILED(ctx.ds->ReadVirtual(baseAddr, &dos, sizeof(dos), &rd)) || rd != sizeof(dos)) {
+        return false;
+    }
+    if (dos.e_magic != 0x5A4D) { // 'MZ'
+        return false;
+    }
+
+    IMAGE_NT_HEADERS64 nth{};
+    if (FAILED(ctx.ds->ReadVirtual(baseAddr + dos.e_lfanew, &nth, sizeof(nth), &rd)) || rd != sizeof(nth)) {
+        return false;
+    }
+    if (nth.Signature != 0x00004550) { // 'PE\0\0'
+        return false;
+    }
+
+    out.baseAddr           = baseAddr;
+    out.machine            = nth.FileHeader.Machine;
+    out.numberOfSections   = nth.FileHeader.NumberOfSections;
+    out.sizeOfImage        = nth.OptionalHeader.SizeOfImage;
+    out.entryPointRVA      = nth.OptionalHeader.AddressOfEntryPoint;
+    out.entryPointVA       = baseAddr + nth.OptionalHeader.AddressOfEntryPoint;
+    out.dllCharacteristics = nth.OptionalHeader.DllCharacteristics;
+    out.sizeOfCode         = nth.OptionalHeader.SizeOfCode;
+    out.baseOfCode         = nth.OptionalHeader.BaseOfCode;
+
+    // Read Section Table
+    const ULONG64 secHeadAddr = baseAddr + dos.e_lfanew + 4 + sizeof(IMAGE_FILE_HEADER) + nth.FileHeader.SizeOfOptionalHeader;
+    out.sections.resize(out.numberOfSections);
+    const ULONG secBytes = out.numberOfSections * sizeof(IMAGE_SECTION_HEADER);
+    ctx.ds->ReadVirtual(secHeadAddr, out.sections.data(), secBytes, &rd);
+
+    // Resolve module name if possible
+    wchar_t nameBuf[128] = {};
+    if (SUCCEEDED(ctx.sym->GetModuleNameStringWide(DEBUG_MODNAME_MODULE, DEBUG_ANY_ID, baseAddr, nameBuf, _countof(nameBuf), nullptr))) {
+        out.moduleName = nameBuf;
+    } else {
+        out.moduleName = L"UnknownModule";
+    }
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PE Analyzer — PE Header, Sections, CFG & Entry Point Inspection
+// ─────────────────────────────────────────────────────────────────────────────
+
+static HRESULT RunPhasePe(const DebugContext& ctx, const wchar_t* arg) {
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n"
+        L"+==============================================================+\n"
+        L"|  PE IMAGE & ENTRY POINT ANALYZER (CFT)                       |\n"
+        L"+==============================================================+\n");
+
+    ULONG64 baseAddr = 0;
+    if (arg && wcslen(arg) > 0) {
+        // Try module name resolution first
+        ULONG modIdx = 0;
+        if (FAILED(ctx.sym->GetModuleByModuleNameWide(arg, 0, &modIdx, &baseAddr)) || baseAddr == 0) {
+            baseAddr = ResolveTarget(ctx.sym, arg);
+        }
+    } else {
+        // Default: find module of current IP
+        ULONG64 curIp = 0;
+        if (ctx.regs && SUCCEEDED(ctx.regs->GetInstructionOffset(&curIp)) && curIp != 0) {
+            ULONG modIdx = 0;
+            ctx.sym->GetModuleByOffset(curIp, 0, &modIdx, &baseAddr);
+        }
+    }
+
+    if (baseAddr == 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[-] Cannot resolve target module base.\n"
+            L"    Usage: !cft pe [module|addr]\n"
+            L"    Example: !cft pe ntoskrnl\n"
+            L"    Example: !cft pe 0xfffff8019d800000\n");
+        return E_INVALIDARG;
+    }
+
+    PeParsedInfo pe{};
+    if (!ReadPeModuleHeader(ctx, baseAddr, pe)) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[-] Failed to parse PE header at 0x%016llx (Not a valid PE image)\n",
+            static_cast<unsigned long long>(baseAddr));
+        return E_FAIL;
+    }
+
+    const wchar_t* archName = L"Unknown";
+    switch (pe.machine) {
+        case 0xAA64: archName = L"ARM64 (AArch64)"; break;
+        case 0x8664: archName = L"x64 (AMD64)";      break;
+        case 0x014C: archName = L"x86 (i386)";       break;
+        default: break;
+    }
+
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n  Module Name       : %s\n"
+        L"  Image Base        : 0x%016llx\n"
+        L"  Size of Image     : 0x%08lx (%lu KB)\n"
+        L"  Architecture      : %s (0x%04x)\n"
+        L"  Number of Sections: %u\n",
+        pe.moduleName.c_str(),
+        static_cast<unsigned long long>(pe.baseAddr),
+        pe.sizeOfImage, pe.sizeOfImage / 1024,
+        archName, pe.machine,
+        pe.numberOfSections);
+
+    // ── Entry Point Analysis ─────────────────────────────────────────────────
+    wchar_t entrySym[128] = {};
+    ULONG64 entryDisp = 0;
+    ctx.sym->GetNameByOffsetWide(pe.entryPointVA, entrySym, _countof(entrySym), nullptr, &entryDisp);
+
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n  --- Entry Point (Initial Control Transfer) ---\n"
+        L"  AddressOfEntryPoint: RVA +0x%08lx  ->  VA 0x%016llx",
+        pe.entryPointRVA,
+        static_cast<unsigned long long>(pe.entryPointVA));
+
+    if (wcslen(entrySym) > 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  (%s+0x%llx)",
+            entrySym, static_cast<unsigned long long>(entryDisp));
+    }
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n");
+
+    // Hook / Patch check at EntryPoint
+    uint8_t epBytes[16] = {};
+    ULONG rd = 0;
+    if (SUCCEEDED(ctx.ds->ReadVirtual(pe.entryPointVA, epBytes, sizeof(epBytes), &rd)) && rd >= 4) {
+        bool isHooked = false;
+        if (pe.machine == 0xAA64) {
+            uint32_t insn0 = *reinterpret_cast<uint32_t*>(epBytes);
+            // Check if first instruction is B or BR (redirect)
+            if ((insn0 & 0xFC000000) == 0x14000000 || (insn0 & 0xFFFFFC1F) == 0xD61F0000) {
+                isHooked = true;
+            }
+        } else if (pe.machine == 0x8664 || pe.machine == 0x014C) {
+            // Check if first byte is JMP rel32 (0xE9) or JMP [RIP+disp] (FF 25)
+            if (epBytes[0] == 0xE9 || (epBytes[0] == 0xFF && epBytes[1] == 0x25)) {
+                isHooked = true;
+            }
+        }
+
+        if (isHooked) {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"  Hook Status        : [!] WARNING: Entry Point is hooked / redirected!\n");
+        } else {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"  Hook Status        : [OK] Normal entry point prologue (unpatched)\n");
+        }
+    }
+
+    // ── Security & CFG Flags ─────────────────────────────────────────────────
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n  --- Security & Control Flow Integrity ---\n"
+        L"  Control Flow Guard (CFG) : %s\n"
+        L"  High Entropy ASLR (64-bit): %s\n"
+        L"  NX / DEP Compatibility   : %s\n",
+        (pe.dllCharacteristics & 0x4000) ? L"ENABLED" : L"DISABLED",
+        (pe.dllCharacteristics & 0x0020) ? L"ENABLED" : L"DISABLED",
+        (pe.dllCharacteristics & 0x0100) ? L"ENABLED" : L"DISABLED");
+
+    // ── Section Table ────────────────────────────────────────────────────────
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n  --- Section Table (Memory Regions) ---\n"
+        L"  Name      RVA         VirtualSize  RawSize     Flags       Characteristics\n"
+        L"  --------  ----------  -----------  ----------  ----------  --------------------------------\n");
+
+    for (const auto& sec : pe.sections) {
+        char secName[9] = {};
+        memcpy(secName, sec.Name, 8);
+
+        wchar_t perm[8] = L"---";
+        if (sec.Characteristics & 0x40000000) perm[0] = L'R';
+        if (sec.Characteristics & 0x80000000) perm[1] = L'W';
+        if (sec.Characteristics & 0x20000000) perm[2] = L'X';
+
+        const bool isExec = (sec.Characteristics & 0x20000000) != 0;
+
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  %-8S  +0x%08lx  0x%08lx   0x%08lx  %-10s  %s\n",
+            secName,
+            sec.VirtualAddress,
+            sec.Misc.VirtualSize,
+            sec.SizeOfRawData,
+            perm,
+            isExec ? L"[EXECUTABLE CODE REGION]" : L"[DATA / READONLY]");
+    }
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n");
+
+    return S_OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -268,6 +486,244 @@ static ArmDecodedBranch DecodeArm64Branch(uint32_t insn, ULONG64 pc) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MAP — Control Flow Graph (CFG) Potential Edge Map Discovery
+// ─────────────────────────────────────────────────────────────────────────────
+
+static HRESULT RunPhaseMap(const DebugContext& ctx, const wchar_t* arg, const wchar_t* extraArg) {
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n"
+        L"+==============================================================+\n"
+        L"|  CONTROL FLOW GRAPH (CFG) POTENTIAL EDGE MAP                 |\n"
+        L"+==============================================================+\n");
+
+    ULONG64 baseAddr = 0;
+    if (arg && wcslen(arg) > 0) {
+        ULONG modIdx = 0;
+        if (FAILED(ctx.sym->GetModuleByModuleNameWide(arg, 0, &modIdx, &baseAddr)) || baseAddr == 0) {
+            baseAddr = ResolveTarget(ctx.sym, arg);
+        }
+    } else {
+        ULONG64 curIp = 0;
+        if (ctx.regs && SUCCEEDED(ctx.regs->GetInstructionOffset(&curIp)) && curIp != 0) {
+            ULONG modIdx = 0;
+            ctx.sym->GetModuleByOffset(curIp, 0, &modIdx, &baseAddr);
+        }
+    }
+
+    if (baseAddr == 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[-] Cannot resolve target module base.\n"
+            L"    Usage: !cft map [module|addr] [max_edges]\n"
+            L"    Example: !cft map ntoskrnl 64\n");
+        return E_INVALIDARG;
+    }
+
+    PeParsedInfo pe{};
+    if (!ReadPeModuleHeader(ctx, baseAddr, pe)) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[-] Failed to read PE headers at 0x%016llx\n",
+            static_cast<unsigned long long>(baseAddr));
+        return E_FAIL;
+    }
+
+    ULONG maxEdges = 64;
+    if (extraArg && wcslen(extraArg) > 0) {
+        ULONG userEdges = static_cast<ULONG>(wcstoul(extraArg, nullptr, 10));
+        if (userEdges > 0 && userEdges <= 512) {
+            maxEdges = userEdges;
+        }
+    }
+
+    const bool isArm64 = (pe.machine == 0xAA64);
+
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n  Target Module : %s (0x%016llx)\n"
+        L"  Architecture  : %s\n"
+        L"  Max Edges     : %lu\n\n",
+        pe.moduleName.c_str(),
+        static_cast<unsigned long long>(baseAddr),
+        isArm64 ? L"ARM64 (AArch64)" : L"x64 / x86",
+        static_cast<unsigned long>(maxEdges));
+
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"  #   Source RVA   Type            Target Address / Target Symbol             Scope\n"
+        L"  --  -----------  --------------  -----------------------------------------  -------------\n");
+
+    ULONG edgeCount = 0;
+    ULONG internalCount = 0;
+    ULONG crossModuleCount = 0;
+    ULONG indirectCount = 0;
+
+    for (const auto& sec : pe.sections) {
+        if ((sec.Characteristics & 0x20000000) == 0) continue; // Skip non-executable sections
+        if (edgeCount >= maxEdges) break;
+
+        const ULONG secScanSize = (sec.Misc.VirtualSize < 0x20000) ? sec.Misc.VirtualSize : 0x20000;
+        std::vector<uint8_t> codeBuf(secScanSize);
+        ULONG rd = 0;
+        if (FAILED(ctx.ds->ReadVirtual(baseAddr + sec.VirtualAddress, codeBuf.data(), secScanSize, &rd)) || rd < 4) {
+            continue;
+        }
+
+        if (isArm64) {
+            for (ULONG off = 0; off + 4 <= rd && edgeCount < maxEdges; off += 4) {
+                if (ctx.ctrl->GetInterrupt() == S_OK) break;
+
+                const ULONG64 insnAddr = baseAddr + sec.VirtualAddress + off;
+                const uint32_t insn = *reinterpret_cast<const uint32_t*>(codeBuf.data() + off);
+
+                ArmDecodedBranch br = DecodeArm64Branch(insn, insnAddr);
+                if (br.type == ArmBranchType::None) continue;
+
+                edgeCount++;
+
+                const wchar_t* scope = L"INTERNAL";
+                wchar_t targetDisplay[128] = {};
+
+                if (br.hasTarget) {
+                    wchar_t tgtSym[128] = {};
+                    ULONG64 tgtDisp = 0;
+                    ctx.sym->GetNameByOffsetWide(br.targetAddr, tgtSym, _countof(tgtSym), nullptr, &tgtDisp);
+
+                    if (br.targetAddr >= baseAddr && br.targetAddr < (baseAddr + pe.sizeOfImage)) {
+                        internalCount++;
+                        scope = L"INTERNAL";
+                    } else {
+                        crossModuleCount++;
+                        scope = L"CROSS_MOD";
+                    }
+
+                    if (wcslen(tgtSym) > 0) {
+                        swprintf_s(targetDisplay, _countof(targetDisplay), L"0x%016llx (%s)",
+                            static_cast<unsigned long long>(br.targetAddr), tgtSym);
+                    } else {
+                        swprintf_s(targetDisplay, _countof(targetDisplay), L"0x%016llx",
+                            static_cast<unsigned long long>(br.targetAddr));
+                    }
+                } else if (br.isIndirect) {
+                    indirectCount++;
+                    scope = L"INDIR_DYN";
+                    swprintf_s(targetDisplay, _countof(targetDisplay), L"[reg x%d] (runtime computed)", br.regIndex);
+                } else {
+                    scope = L"SYSTEM";
+                    swprintf_s(targetDisplay, _countof(targetDisplay), L"[kernel trap / return]");
+                }
+
+                ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                    L"  %02lu  +0x%08lx   %-14s  %-41s  %s\n",
+                    static_cast<unsigned long>(edgeCount),
+                    static_cast<unsigned long>(sec.VirtualAddress + off),
+                    br.typeName,
+                    targetDisplay,
+                    scope);
+            }
+        }
+    }
+
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n"
+        L"  --- Control-Flow Map Summary ---\n"
+        L"  Potential edges mapped: %lu\n"
+        L"  Internal module edges : %lu\n"
+        L"  Cross-module API calls: %lu\n"
+        L"  Indirect/dynamic edges: %lu (require runtime monitoring)\n\n",
+        static_cast<unsigned long>(edgeCount),
+        static_cast<unsigned long>(internalCount),
+        static_cast<unsigned long>(crossModuleCount),
+        static_cast<unsigned long>(indirectCount));
+
+    return S_OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EDGE — Transition Context Inspection & Correlator
+// ─────────────────────────────────────────────────────────────────────────────
+
+static HRESULT RunPhaseEdge(const DebugContext& ctx, const wchar_t* srcArg, const wchar_t* dstArg) {
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n"
+        L"+==============================================================+\n"
+        L"|  TRANSITION CONTEXT INSPECTION & CORRELATOR (CFT)            |\n"
+        L"+==============================================================+\n");
+
+    if (!srcArg || !dstArg || wcslen(srcArg) == 0 || wcslen(dstArg) == 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[-] Usage: !cft edge <source_addr> <target_addr>\n"
+            L"    Example: !cft edge nt!KiSystemService 0xfffff8019e101e80\n");
+        return E_INVALIDARG;
+    }
+
+    const ULONG64 srcAddr = ResolveTarget(ctx.sym, srcArg);
+    const ULONG64 dstAddr = ResolveTarget(ctx.sym, dstArg);
+
+    if (srcAddr == 0 || dstAddr == 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"[-] Failed to resolve addresses: src=0x%016llx dst=0x%016llx\n",
+            static_cast<unsigned long long>(srcAddr),
+            static_cast<unsigned long long>(dstAddr));
+        return E_FAIL;
+    }
+
+    wchar_t srcSym[128] = {}, dstSym[128] = {};
+    ULONG64 srcDisp = 0, dstDisp = 0;
+    ctx.sym->GetNameByOffsetWide(srcAddr, srcSym, _countof(srcSym), nullptr, &srcDisp);
+    ctx.sym->GetNameByOffsetWide(dstAddr, dstSym, _countof(dstSym), nullptr, &dstDisp);
+
+    ULONG64 srcMod = 0, dstMod = 0;
+    ULONG srcIdx = 0, dstIdx = 0;
+    ctx.sym->GetModuleByOffset(srcAddr, 0, &srcIdx, &srcMod);
+    ctx.sym->GetModuleByOffset(dstAddr, 0, &dstIdx, &dstMod);
+
+    wchar_t srcModName[64] = L"Unknown", dstModName[64] = L"Unknown";
+    if (srcMod) ctx.sym->GetModuleNameStringWide(DEBUG_MODNAME_MODULE, DEBUG_ANY_ID, srcMod, srcModName, _countof(srcModName), nullptr);
+    if (dstMod) ctx.sym->GetModuleNameStringWide(DEBUG_MODNAME_MODULE, DEBUG_ANY_ID, dstMod, dstModName, _countof(dstModName), nullptr);
+
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n  Source Address : 0x%016llx (%s!%s+0x%llx)\n"
+        L"  Target Address : 0x%016llx (%s!%s+0x%llx)\n\n",
+        static_cast<unsigned long long>(srcAddr), srcModName, srcSym, static_cast<unsigned long long>(srcDisp),
+        static_cast<unsigned long long>(dstAddr), dstModName, dstSym, static_cast<unsigned long long>(dstDisp));
+
+    // ── Transition Verification Checks ───────────────────────────────────────
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  --- Transition Integrity Checks ---\n");
+
+    const bool isArm64 = IsArm64Target(ctx.ctrl);
+    if (isArm64 && (dstAddr & 0x3) != 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [!] CRITICAL: Target address is NOT 4-byte aligned (ARM64 alignment fault)!\n");
+    } else {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [OK] Target address is properly aligned.\n");
+    }
+
+    if (srcMod != 0 && dstMod != 0) {
+        if (srcMod == dstMod) {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"  [OK] Intra-module transition (within %s).\n", srcModName);
+        } else {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"  [*] Cross-module transition: %s  ->  %s\n", srcModName, dstModName);
+        }
+    } else if (dstMod == 0) {
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  [!] SUSPECT: Target is in unmapped or dynamically allocated non-module memory!\n");
+    }
+
+    // ── Disassembly Context ──────────────────────────────────────────────────
+    PrintSectionHeader(ctx.ctrl, L"Source Transition Instructions");
+    char uSrcCmd[64];
+    sprintf_s(uSrcCmd, "u 0x%016llx L5", static_cast<unsigned long long>(srcAddr));
+    ctx.ctrl->Execute(DEBUG_OUTCTL_ALL_CLIENTS, uSrcCmd, DEBUG_EXECUTE_DEFAULT);
+
+    PrintSectionHeader(ctx.ctrl, L"Target Destination Instructions");
+    char uDstCmd[64];
+    sprintf_s(uDstCmd, "u 0x%016llx L5", static_cast<unsigned long long>(dstAddr));
+    ctx.ctrl->Execute(DEBUG_OUTCTL_ALL_CLIENTS, uDstCmd, DEBUG_EXECUTE_DEFAULT);
+
+    return S_OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TRACE — ARM / x64 Control Flow Transfer (CFT) Tracer
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -374,7 +830,6 @@ static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const 
 
             transferCount++;
 
-            // Statistics accumulation
             switch (br.type) {
                 case ArmBranchType::DirectCall:      directCalls++;   break;
                 case ArmBranchType::IndirectCall:
@@ -400,23 +855,19 @@ static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const 
             ULONG64 nextOff = 0;
             ctx.ctrl->Disassemble(insnAddr, 0, disasmBuf, sizeof(disasmBuf), nullptr, &nextOff);
 
-            // Clean trailing newline from WinDbg disasm output
             for (char* p = disasmBuf; *p; ++p) {
                 if (*p == '\r' || *p == '\n') { *p = '\0'; break; }
             }
 
-            // Skip module/address prefix if present in disasm string to isolate instruction mnemonic
             const char* insnText = disasmBuf;
             const char* lastTab = strrchr(disasmBuf, '\t');
             if (lastTab) {
                 insnText = lastTab + 1;
             }
 
-            // Target destination annotations
             wchar_t targetInfo[256] = {};
 
             if (br.hasTarget) {
-                // Direct branch with known computed target
                 wchar_t tgtSym[128] = {};
                 ULONG64 tgtDisp = 0;
                 if (SUCCEEDED(ctx.sym->GetNameByOffsetWide(br.targetAddr, tgtSym, _countof(tgtSym), nullptr, &tgtDisp))) {
@@ -432,12 +883,10 @@ static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const 
                         static_cast<unsigned long long>(br.targetAddr));
                 }
 
-                // Check 4-byte ARM64 alignment invariant
                 if (br.targetAddr & 0x3) {
                     wcscat_s(targetInfo, L" [!] UNALIGNED DEST");
                 }
             } else if (br.isIndirect && br.regIndex >= 0) {
-                // Indirect branch via register (e.g. blr x16, ret x30)
                 ULONG64 regVal = 0;
                 if (QueryRegisterValue(ctx.regs, br.regIndex, &regVal)) {
                     wchar_t rSym[128] = {};
@@ -484,7 +933,6 @@ static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const 
                 targetInfo);
         }
 
-        // Print CFT summary
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"\n"
             L"  --- Control Flow Transfer Summary ---\n"
@@ -528,7 +976,6 @@ static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const 
                 if (*p == '\r' || *p == '\n') { *p = '\0'; break; }
             }
 
-            // Check if disasm contains transfer mnemonics (call, jmp, jcc, ret, syscall)
             if (strstr(disBuf, "call") || strstr(disBuf, "jmp") || strstr(disBuf, "ret") ||
                 strstr(disBuf, "j") || strstr(disBuf, "syscall") || strstr(disBuf, "sysenter")) {
                 transferCount++;
@@ -576,7 +1023,6 @@ static HRESULT RunPhaseSnap(const DebugContext& ctx, const wchar_t* /*arg*/) {
     ULONG64 ip = 0;
     HRESULT hr = ctx.regs->GetInstructionOffset(&ip);
 
-    // Fallback: query named register if GetInstructionOffset fails
     if (FAILED(hr) || ip == 0) {
         static const char* kRegNames[] = { "pc", "rip", "eip" };
         bool found = false;
@@ -670,7 +1116,6 @@ static HRESULT RunPhaseWatch(const DebugContext& ctx, const wchar_t* arg) {
         return E_INVALIDARG;
     }
 
-    // ── 1. Resolve target ────────────────────────────────────────────────────
     ModuleInfo modInfo{};
     const ULONG64 addr = ResolveTarget(ctx.sym, arg, &modInfo);
     if (addr == 0) {
@@ -689,7 +1134,6 @@ static HRESULT RunPhaseWatch(const DebugContext& ctx, const wchar_t* arg) {
             modInfo.name, static_cast<unsigned long long>(modInfo.base));
     }
 
-    // ── 2. Set hardware execution breakpoint ─────────────────────────────────
     char bpCmd[80];
     sprintf_s(bpCmd, "ba e 1 0x%016llx", static_cast<unsigned long long>(addr));
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
@@ -698,14 +1142,12 @@ static HRESULT RunPhaseWatch(const DebugContext& ctx, const wchar_t* arg) {
     ctx.ctrl->Execute(DEBUG_OUTCTL_ALL_CLIENTS, bpCmd, DEBUG_EXECUTE_DEFAULT);
     ctx.ctrl->Execute(DEBUG_OUTCTL_ALL_CLIENTS, "bl", DEBUG_EXECUTE_DEFAULT);
 
-    // ── 3. Bayesian field scan (prologue structure) ───────────────────────────
     PrintSectionHeader(ctx.ctrl, L"Bayesian field scan at target  (0x100 bytes)");
     HRESULT hr = DoSingleScan(ctx, arg, 0x100);
     if (FAILED(hr)) {
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"  [!] Scan failed\n");
     }
 
-    // ── 4. Entropy heatmap ───────────────────────────────────────────────────
     PrintSectionHeader(ctx.ctrl, L"Entropy heatmap  (0x200 bytes)");
     hr = DoEntropyMap(ctx, arg, 0x200);
     if (FAILED(hr)) {
@@ -861,7 +1303,7 @@ struct CftPhaseEntry {
     const wchar_t* keyword;
     const wchar_t* label;
     HRESULT (*fn)(const DebugContext&, const wchar_t* arg);
-    bool runInAllMode;   // false = only via explicit subcommand (needs user arg)
+    bool runInAllMode;
 };
 
 static const CftPhaseEntry kCftPhases[] = {
@@ -872,7 +1314,7 @@ static const CftPhaseEntry kCftPhases[] = {
     { L"threads", L"KTHREAD cross-ref",      RunPhaseThreads,   true  },
     { L"cfg",     L"CFG bitmap",             RunPhaseCfg,       true  },
     { L"ldr",     L"LDR module list",        RunPhaseLdr,       true  },
-    { L"watch",   L"Hardware exec BP+scan",  RunPhaseWatch,     false }, // needs arg
+    { L"watch",   L"Hardware exec BP+scan",  RunPhaseWatch,     false },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -883,9 +1325,20 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
                       const wchar_t* arg, const wchar_t* extraArg) {
     const bool runAll = (subcommand == nullptr || wcslen(subcommand) == 0);
 
-    // If user ran `!cft trace`
-    if (subcommand && _wcsicmp(subcommand, L"trace") == 0) {
-        return RunPhaseTrace(ctx, arg, extraArg);
+    // Direct subcommands
+    if (subcommand) {
+        if (_wcsicmp(subcommand, L"trace") == 0) {
+            return RunPhaseTrace(ctx, arg, extraArg);
+        }
+        if (_wcsicmp(subcommand, L"pe") == 0) {
+            return RunPhasePe(ctx, arg);
+        }
+        if (_wcsicmp(subcommand, L"map") == 0) {
+            return RunPhaseMap(ctx, arg, extraArg);
+        }
+        if (_wcsicmp(subcommand, L"edge") == 0) {
+            return RunPhaseEdge(ctx, arg, extraArg);
+        }
     }
 
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
@@ -894,11 +1347,14 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
         L"  StructScan !cft v4.0  --  Control Flow Transfer Tracer\n"
         L"================================================================\n"
         L"\n"
-        L"  Tracing    : trace [sym|addr] [count] (ARM64 / x64 branch tracer)\n"
+        L"  PE Map     : pe [module|addr]         (PE header, sections, CFG & entry point)\n"
+        L"  Edge Graph : map [module|addr] [max]  (Control-flow graph potential edges)\n"
+        L"  Transition : edge <src> <dst>         (Inspect a specific control transfer edge)\n"
+        L"  Tracing    : trace [sym|addr] [count] (ARM64 / x64 dynamic branch tracer)\n"
         L"  Live State : snap                     (PC, regs, disasm, stack, entropy)\n"
         L"  Breakpoint : watch <sym|addr>         (Hardware BP + profile)\n"
         L"  Structural : trap | syscall | threads | cfg | ldr\n"
-        L"  (no args   : run all 6 phases except watch and trace)\n");
+        L"  (no args   : run all 6 phases except watch, trace, pe, map, edge)\n");
 
     if (!runAll) {
         for (const auto& phase : kCftPhases) {
@@ -908,12 +1364,11 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
         }
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"\n[-] Unknown subcommand: '%s'\n"
-            L"    Valid: trace | snap | watch | trap | syscall | threads | cfg | ldr\n",
+            L"    Valid: pe | map | edge | trace | snap | watch | trap | syscall | threads | cfg | ldr\n",
             subcommand);
         return E_INVALIDARG;
     }
 
-    // All-phases mode: sequential, continue on failure, skip watch and trace
     HRESULT worst = S_OK;
     int completed = 0, skipped = 0;
 
