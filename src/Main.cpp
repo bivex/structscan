@@ -77,7 +77,7 @@ static void PrintStructscanUsage(IDebugControl4* ctrl) {
         L"   !structscan emit <sym|addr> [size]     - Synthesize C/C++ struct header\n"
         L"   !structscan entropy <sym|addr> [size]  - Shannon entropy heatmap\n"
         L"   !structscan unload                     - Unload hint\n\n"
-        L"   !cft [trap|syscall|threads|cfg|ldr]    - Control flow auto-analyzer\n"
+        L"   !cft / !ctf [trace|snap|watch|trap]    - Control Flow Transfer Tracer (ARM / x64)\n"
         L"   !uaf <sym|addr> [size] [searchbytes]   - Use-After-Free analyzer\n\n"
         L" EXAMPLES:\n"
         L"   !structscan nt!PsInitialSystemProcess 0x400\n"
@@ -201,11 +201,16 @@ __declspec(dllexport) HRESULT CALLBACK cft(_In_ IDebugClient* Client, _In_opt_ P
     ScopedDebugInterfaces dbg;
     if (!dbg.Acquire(Client)) return E_FAIL;
 
-    // Parse up to two tokens: subcommand + optional argument
-    // e.g. "watch nt!KiSystemCall64"  →  tok0="watch"  tok1="nt!KiSystemCall64"
+    // Parse up to three tokens: subcommand + arg + extraArg
+    // e.g. "!cft trace nt!KiSystemService 20"
     CommandArgs parsed = ParseCommandArgs(Args ? Args : "");
-    const wchar_t* sub = (parsed.count >= 1 && wcslen(parsed.tok0) > 0) ? parsed.tok0 : nullptr;
-    const wchar_t* arg = (parsed.count >= 2 && wcslen(parsed.tok1) > 0) ? parsed.tok1 : nullptr;
+    const wchar_t* sub   = (parsed.count >= 1 && wcslen(parsed.tok0) > 0) ? parsed.tok0 : nullptr;
+    const wchar_t* arg   = (parsed.count >= 2 && wcslen(parsed.tok1) > 0) ? parsed.tok1 : nullptr;
+    const wchar_t* extra = (parsed.count >= 3 && wcslen(parsed.tok2) > 0) ? parsed.tok2 : nullptr;
 
-    return DoCftAnalysis(dbg.ctx, sub, arg);
+    return DoCftAnalysis(dbg.ctx, sub, arg, extra);
+}
+
+__declspec(dllexport) HRESULT CALLBACK ctf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args) {
+    return cft(Client, Args);
 }

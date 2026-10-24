@@ -1,9 +1,10 @@
 /**
  * @file CftEngine.cpp
- * @brief !cft — Control Flow Transfer Auto-Analyzer (Multi-Architecture: ARM64 / x64 / x86)
+ * @brief !cft / !ctf — Control Flow Transfer Auto-Analyzer & ARM CTF Tracer
  *
  * Subcommands:
- *   !cft                       — all structural phases + live snapshot
+ *   !cft / !ctf                — all structural phases + live snapshot
+ *   !cft trace [sym|addr] [N]  — ARM64 / x64 Control Flow Transfer (CFT/CTF) trace
  *   !cft snap                  — live snapshot: PC/RIP + disasm + regs + stack + entropy
  *   !cft watch <sym|addr>      — Bayesian scan target + set hardware exec BP
  *   !cft trap                  — Phase 1: KTRAP_FRAME / KTHREAD C/C++ header
@@ -16,6 +17,8 @@
 #include "../include/structscan.h"
 #include <cwchar>
 #include <cstdio>
+#include <vector>
+#include <string>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
@@ -67,6 +70,486 @@ static const wchar_t* GetIpRegisterName(IDebugControl4* ctrl) {
         }
     }
     return L"IP";
+}
+
+static bool IsArm64Target(IDebugControl4* ctrl) {
+    ULONG procType = 0;
+    if (SUCCEEDED(ctrl->GetEffectiveProcessorType(&procType))) {
+        return (procType == 0xAA64 || procType == 0x01C4);
+    }
+    return false;
+}
+
+// Query register value from live debug session
+static bool QueryRegisterValue(IDebugRegisters2* regs, int regIdx, ULONG64* outVal) {
+    if (!regs || regIdx < 0 || regIdx > 31 || !outVal) return false;
+    char rname[8];
+    if (regIdx == 30) {
+        strcpy_s(rname, "lr");
+    } else {
+        sprintf_s(rname, "x%d", regIdx);
+    }
+    ULONG idx = 0;
+    if (SUCCEEDED(regs->GetIndexByName(rname, &idx))) {
+        DEBUG_VALUE val{};
+        if (SUCCEEDED(regs->GetValue(idx, &val))) {
+            *outVal = val.I64;
+            return true;
+        }
+    }
+    return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ARM64 Control Flow Transfer (CFT / CTF) Instruction Decoder
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum class ArmBranchType {
+    None,
+    DirectCall,        // BL
+    IndirectCall,      // BLR
+    PacIndirectCall,   // BLRAA, BLRAB
+    DirectJump,        // B
+    IndirectJump,      // BR
+    PacIndirectJump,   // BRAA, BRAB
+    CondBranch,        // B.cond
+    CompareBranch,     // CBZ, CBNZ
+    TestBitBranch,     // TBZ, TBNZ
+    Return,            // RET
+    PacReturn,         // RETAA, RETAB
+    Syscall,           // SVC
+    ExceptionReturn,   // ERET
+    DebugBreak,        // BRK
+    HypervisorCall,    // HVC, SMC
+};
+
+struct ArmDecodedBranch {
+    ArmBranchType  type{ArmBranchType::None};
+    const wchar_t* typeName{L""};
+    ULONG64        targetAddr{0};
+    int            regIndex{-1};
+    bool           isIndirect{false};
+    bool           isPac{false};
+    bool           hasTarget{false};
+};
+
+static ArmDecodedBranch DecodeArm64Branch(uint32_t insn, ULONG64 pc) {
+    ArmDecodedBranch d{};
+
+    // RET (standard x30 or register)
+    if ((insn & 0xFFFFFC1F) == 0xD65F0000) {
+        d.type = ArmBranchType::Return;
+        d.typeName = L"RETURN";
+        d.regIndex = (insn >> 5) & 0x1F;
+        d.isIndirect = true;
+        return d;
+    }
+    // RETAA / RETAB (PAC authenticated return)
+    if (insn == 0xD65F0BFF || insn == 0xD65F0FFF) {
+        d.type = ArmBranchType::PacReturn;
+        d.typeName = (insn == 0xD65F0BFF) ? L"PAC_RETA" : L"PAC_RETB";
+        d.regIndex = 30;
+        d.isIndirect = true;
+        d.isPac = true;
+        return d;
+    }
+    // BLR (indirect call)
+    if ((insn & 0xFFFFFC1F) == 0xD63F0000) {
+        d.type = ArmBranchType::IndirectCall;
+        d.typeName = L"INDIR_CALL";
+        d.regIndex = (insn >> 5) & 0x1F;
+        d.isIndirect = true;
+        return d;
+    }
+    // BLRAA / BLRAB (PAC indirect call)
+    if ((insn & 0xFE200000) == 0xD6200000 && ((insn >> 10) & 0x1E) == 0x04) {
+        d.type = ArmBranchType::PacIndirectCall;
+        d.typeName = L"PAC_INDIR_CALL";
+        d.regIndex = (insn >> 5) & 0x1F;
+        d.isIndirect = true;
+        d.isPac = true;
+        return d;
+    }
+    // BR (indirect jump)
+    if ((insn & 0xFFFFFC1F) == 0xD61F0000) {
+        d.type = ArmBranchType::IndirectJump;
+        d.typeName = L"INDIR_JUMP";
+        d.regIndex = (insn >> 5) & 0x1F;
+        d.isIndirect = true;
+        return d;
+    }
+    // BRAA / BRAB (PAC indirect jump)
+    if ((insn & 0xFE200000) == 0xD6200000 && ((insn >> 10) & 0x1E) == 0x00) {
+        d.type = ArmBranchType::PacIndirectJump;
+        d.typeName = L"PAC_INDIR_JUMP";
+        d.regIndex = (insn >> 5) & 0x1F;
+        d.isIndirect = true;
+        d.isPac = true;
+        return d;
+    }
+    // BL (direct call)
+    if ((insn & 0xFC000000) == 0x94000000) {
+        d.type = ArmBranchType::DirectCall;
+        d.typeName = L"CALL";
+        int64_t imm26 = static_cast<int64_t>(insn & 0x03FFFFFF);
+        if (imm26 & 0x02000000) imm26 -= 0x04000000;
+        d.targetAddr = pc + imm26 * 4;
+        d.hasTarget = true;
+        return d;
+    }
+    // B (direct unconditional jump)
+    if ((insn & 0xFC000000) == 0x14000000) {
+        d.type = ArmBranchType::DirectJump;
+        d.typeName = L"JUMP";
+        int64_t imm26 = static_cast<int64_t>(insn & 0x03FFFFFF);
+        if (imm26 & 0x02000000) imm26 -= 0x04000000;
+        d.targetAddr = pc + imm26 * 4;
+        d.hasTarget = true;
+        return d;
+    }
+    // B.cond
+    if ((insn & 0xFF000010) == 0x54000000) {
+        d.type = ArmBranchType::CondBranch;
+        d.typeName = L"COND_BRANCH";
+        int64_t imm19 = static_cast<int64_t>((insn >> 5) & 0x7FFFF);
+        if (imm19 & 0x40000) imm19 -= 0x80000;
+        d.targetAddr = pc + imm19 * 4;
+        d.hasTarget = true;
+        return d;
+    }
+    // CBZ / CBNZ
+    if ((insn & 0x7E000000) == 0x34000000 || (insn & 0x7E000000) == 0x35000000) {
+        d.type = ArmBranchType::CompareBranch;
+        d.typeName = (insn & 0x01000000) ? L"CBNZ" : L"CBZ";
+        d.regIndex = insn & 0x1F;
+        int64_t imm19 = static_cast<int64_t>((insn >> 5) & 0x7FFFF);
+        if (imm19 & 0x40000) imm19 -= 0x80000;
+        d.targetAddr = pc + imm19 * 4;
+        d.hasTarget = true;
+        return d;
+    }
+    // TBZ / TBNZ
+    if ((insn & 0x7E000000) == 0x36000000 || (insn & 0x7E000000) == 0x37000000) {
+        d.type = ArmBranchType::TestBitBranch;
+        d.typeName = (insn & 0x01000000) ? L"TBNZ" : L"TBZ";
+        d.regIndex = insn & 0x1F;
+        int64_t imm14 = static_cast<int64_t>((insn >> 5) & 0x3FFF);
+        if (imm14 & 0x2000) imm14 -= 0x4000;
+        d.targetAddr = pc + imm14 * 4;
+        d.hasTarget = true;
+        return d;
+    }
+    // ERET
+    if (insn == 0xD69F03E0) {
+        d.type = ArmBranchType::ExceptionReturn;
+        d.typeName = L"ERET";
+        return d;
+    }
+    // SVC
+    if ((insn & 0xFFE0001F) == 0xD4000001) {
+        d.type = ArmBranchType::Syscall;
+        d.typeName = L"SYSCALL";
+        return d;
+    }
+    // BRK
+    if ((insn & 0xFFE0001F) == 0xD4200000) {
+        d.type = ArmBranchType::DebugBreak;
+        d.typeName = L"BREAKPOINT";
+        return d;
+    }
+    // HVC / SMC
+    if ((insn & 0xFFE0001F) == 0xD4000002 || (insn & 0xFFE0001F) == 0xD4000003) {
+        d.type = ArmBranchType::HypervisorCall;
+        d.typeName = L"HYPERCALL";
+        return d;
+    }
+
+    return d;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRACE — ARM / x64 Control Flow Transfer (CFT / CTF) Tracer
+// ─────────────────────────────────────────────────────────────────────────────
+
+static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const wchar_t* extraArg) {
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n"
+        L"+==============================================================+\n"
+        L"|  ARM / x64 CONTROL FLOW TRANSFER TRACER (CFT / CTF)          |\n"
+        L"+==============================================================+\n");
+
+    // ── 1. Determine target address ──────────────────────────────────────────
+    ULONG64 targetAddr = 0;
+    std::wstring targetLabel;
+
+    if (arg && wcslen(arg) > 0) {
+        targetAddr = ResolveTarget(ctx.sym, arg);
+        if (targetAddr == 0) {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"[-] Cannot resolve target: %s\n", arg);
+            return E_FAIL;
+        }
+        targetLabel = arg;
+    } else {
+        // Default: use current Instruction Pointer (PC on ARM64, RIP on x64)
+        if (ctx.regs && SUCCEEDED(ctx.regs->GetInstructionOffset(&targetAddr)) && targetAddr != 0) {
+            wchar_t sname[128]{};
+            ULONG64 disp = 0;
+            if (SUCCEEDED(ctx.sym->GetNameByOffsetWide(targetAddr, sname, _countof(sname), nullptr, &disp))) {
+                targetLabel = sname;
+            } else {
+                targetLabel = L"Current IP";
+            }
+        } else {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"[-] No target specified and cannot read live IP.\n"
+                L"    Usage: !cft trace <sym|addr> [count]\n"
+                L"    Example: !cft trace nt!KiSystemService 32\n");
+            return E_INVALIDARG;
+        }
+    }
+
+    // ── 2. Determine instruction count ───────────────────────────────────────
+    ULONG maxInsn = 32;
+    if (extraArg && wcslen(extraArg) > 0) {
+        ULONG userCount = static_cast<ULONG>(wcstoul(extraArg, nullptr, 10));
+        if (userCount > 0 && userCount <= 256) {
+            maxInsn = userCount;
+        }
+    }
+
+    const bool isArm64 = IsArm64Target(ctx.ctrl);
+
+    ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+        L"\n  Target       : %s (0x%016llx)\n"
+        L"  Instructions : %lu\n"
+        L"  Architecture : %s\n\n",
+        targetLabel.c_str(),
+        static_cast<unsigned long long>(targetAddr),
+        static_cast<unsigned long>(maxInsn),
+        isArm64 ? L"ARM64 (AArch64)" : L"x64 / x86");
+
+    if (isArm64) {
+        // ── ARM64 Control Flow Transfer Trace ────────────────────────────────
+        const ULONG byteCount = maxInsn * 4;
+        std::vector<uint8_t> codeBuf(byteCount);
+        ULONG bytesRead = 0;
+
+        if (FAILED(ctx.ds->ReadVirtual(targetAddr, codeBuf.data(), byteCount, &bytesRead)) || bytesRead < 4) {
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"[-] ReadVirtual failed at 0x%016llx\n",
+                static_cast<unsigned long long>(targetAddr));
+            return E_FAIL;
+        }
+
+        const ULONG actualInsnCount = bytesRead / 4;
+
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  #   Offset   Address               Type            Instruction & Target\n"
+            L"  --  -------  --------------------  --------------  ---------------------------------------------------\n");
+
+        ULONG transferCount = 0;
+        ULONG directCalls = 0;
+        ULONG indirectCalls = 0;
+        ULONG directJumps = 0;
+        ULONG indirectJumps = 0;
+        ULONG condBranches = 0;
+        ULONG returns = 0;
+        ULONG pacTransfers = 0;
+        ULONG syscalls = 0;
+
+        for (ULONG i = 0; i < actualInsnCount; ++i) {
+            if (ctx.ctrl->GetInterrupt() == S_OK) {
+                ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n[*] Aborted by user (Ctrl+C)\n");
+                break;
+            }
+
+            const ULONG64 insnAddr = targetAddr + (i * 4);
+            const uint32_t insn = *reinterpret_cast<const uint32_t*>(codeBuf.data() + (i * 4));
+
+            ArmDecodedBranch br = DecodeArm64Branch(insn, insnAddr);
+            if (br.type == ArmBranchType::None) {
+                continue; // Not a control transfer instruction
+            }
+
+            transferCount++;
+
+            // Statistics accumulation
+            switch (br.type) {
+                case ArmBranchType::DirectCall:      directCalls++;   break;
+                case ArmBranchType::IndirectCall:
+                case ArmBranchType::PacIndirectCall: indirectCalls++; break;
+                case ArmBranchType::DirectJump:      directJumps++;   break;
+                case ArmBranchType::IndirectJump:
+                case ArmBranchType::PacIndirectJump: indirectJumps++; break;
+                case ArmBranchType::CondBranch:
+                case ArmBranchType::CompareBranch:
+                case ArmBranchType::TestBitBranch:   condBranches++;  break;
+                case ArmBranchType::Return:
+                case ArmBranchType::PacReturn:       returns++;       break;
+                case ArmBranchType::Syscall:
+                case ArmBranchType::ExceptionReturn:
+                case ArmBranchType::DebugBreak:
+                case ArmBranchType::HypervisorCall:  syscalls++;      break;
+                default: break;
+            }
+            if (br.isPac) pacTransfers++;
+
+            // Disassemble instruction text from WinDbg
+            char disasmBuf[128] = {};
+            ULONG64 nextOff = 0;
+            ctx.ctrl->Disassemble(insnAddr, 0, disasmBuf, sizeof(disasmBuf), nullptr, &nextOff);
+
+            // Clean trailing newline from WinDbg disasm output
+            for (char* p = disasmBuf; *p; ++p) {
+                if (*p == '\r' || *p == '\n') { *p = '\0'; break; }
+            }
+
+            // Skip module/address prefix if present in disasm string to isolate instruction mnemonic
+            const char* insnText = disasmBuf;
+            const char* lastTab = strrchr(disasmBuf, '\t');
+            if (lastTab) {
+                insnText = lastTab + 1;
+            }
+
+            // Target destination annotations
+            wchar_t targetInfo[256] = {};
+
+            if (br.hasTarget) {
+                // Direct branch with known computed target
+                wchar_t tgtSym[128] = {};
+                ULONG64 tgtDisp = 0;
+                if (SUCCEEDED(ctx.sym->GetNameByOffsetWide(br.targetAddr, tgtSym, _countof(tgtSym), nullptr, &tgtDisp))) {
+                    if (tgtDisp > 0) {
+                        swprintf_s(targetInfo, _countof(targetInfo), L"-> 0x%016llx (%s+0x%llx)",
+                            static_cast<unsigned long long>(br.targetAddr), tgtSym, static_cast<unsigned long long>(tgtDisp));
+                    } else {
+                        swprintf_s(targetInfo, _countof(targetInfo), L"-> 0x%016llx (%s)",
+                            static_cast<unsigned long long>(br.targetAddr), tgtSym);
+                    }
+                } else {
+                    swprintf_s(targetInfo, _countof(targetInfo), L"-> 0x%016llx",
+                        static_cast<unsigned long long>(br.targetAddr));
+                }
+
+                // Check 4-byte ARM64 alignment invariant
+                if (br.targetAddr & 0x3) {
+                    wcscat_s(targetInfo, L" [!] UNALIGNED DEST");
+                }
+            } else if (br.isIndirect && br.regIndex >= 0) {
+                // Indirect branch via register (e.g. blr x16, ret x30)
+                ULONG64 regVal = 0;
+                if (QueryRegisterValue(ctx.regs, br.regIndex, &regVal)) {
+                    wchar_t rSym[128] = {};
+                    ULONG64 rDisp = 0;
+                    if (SUCCEEDED(ctx.sym->GetNameByOffsetWide(regVal, rSym, _countof(rSym), nullptr, &rDisp))) {
+                        swprintf_s(targetInfo, _countof(targetInfo), L"-> [x%d=0x%016llx %s+0x%llx]",
+                            br.regIndex, static_cast<unsigned long long>(regVal), rSym, static_cast<unsigned long long>(rDisp));
+                    } else {
+                        swprintf_s(targetInfo, _countof(targetInfo), L"-> [x%d=0x%016llx]",
+                            br.regIndex, static_cast<unsigned long long>(regVal));
+                    }
+                } else {
+                    swprintf_s(targetInfo, _countof(targetInfo), L"-> [reg x%d]", br.regIndex);
+                }
+
+                if (br.isPac) {
+                    wcscat_s(targetInfo, L" [PAC-AUTH]");
+                } else if (br.type == ArmBranchType::IndirectCall) {
+                    wcscat_s(targetInfo, L" [CFG-TARGET]");
+                }
+            } else if (br.type == ArmBranchType::Return || br.type == ArmBranchType::PacReturn) {
+                ULONG64 lrVal = 0;
+                if (QueryRegisterValue(ctx.regs, 30, &lrVal)) {
+                    wchar_t lrSym[128] = {};
+                    ULONG64 lrDisp = 0;
+                    if (SUCCEEDED(ctx.sym->GetNameByOffsetWide(lrVal, lrSym, _countof(lrSym), nullptr, &lrDisp))) {
+                        swprintf_s(targetInfo, _countof(targetInfo), L"-> [lr=0x%016llx %s+0x%llx]",
+                            static_cast<unsigned long long>(lrVal), lrSym, static_cast<unsigned long long>(lrDisp));
+                    } else {
+                        swprintf_s(targetInfo, _countof(targetInfo), L"-> [lr=0x%016llx]",
+                            static_cast<unsigned long long>(lrVal));
+                    }
+                }
+                if (br.isPac) wcscat_s(targetInfo, L" [PAC-RET]");
+            }
+
+            ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                L"  %02lu  +0x%04lx  0x%016llx  %-14s  %-24S %s\n",
+                static_cast<unsigned long>(transferCount),
+                static_cast<unsigned long>(i * 4),
+                static_cast<unsigned long long>(insnAddr),
+                br.typeName,
+                insnText,
+                targetInfo);
+        }
+
+        // Print CFT summary
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"\n"
+            L"  --- Control Flow Transfer Summary ---\n"
+            L"  Instructions scanned : %lu\n"
+            L"  Control transfers    : %lu (%.1f%% of code)\n"
+            L"  Direct Calls (BL)    : %lu\n"
+            L"  Indirect Calls (BLR) : %lu\n"
+            L"  Direct Jumps (B)     : %lu\n"
+            L"  Indirect Jumps (BR)  : %lu\n"
+            L"  Cond Branches        : %lu\n"
+            L"  Returns (RET/PAC)    : %lu\n"
+            L"  PAC Authenticated    : %lu\n"
+            L"  Syscalls/Exceptions  : %lu\n\n",
+            static_cast<unsigned long>(actualInsnCount),
+            static_cast<unsigned long>(transferCount),
+            actualInsnCount > 0 ? (transferCount * 100.0 / actualInsnCount) : 0.0,
+            static_cast<unsigned long>(directCalls),
+            static_cast<unsigned long>(indirectCalls),
+            static_cast<unsigned long>(directJumps),
+            static_cast<unsigned long>(indirectJumps),
+            static_cast<unsigned long>(condBranches),
+            static_cast<unsigned long>(returns),
+            static_cast<unsigned long>(pacTransfers),
+            static_cast<unsigned long>(syscalls));
+
+    } else {
+        // ── x64 / x86 Control Flow Transfer Trace via Disassembler ───────────
+        ULONG64 cur = targetAddr;
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"  #   Address               Instruction\n"
+            L"  --  --------------------  ---------------------------------------------------\n");
+
+        ULONG transferCount = 0;
+        for (ULONG i = 0; i < maxInsn; ++i) {
+            char disBuf[128] = {};
+            ULONG64 nextOff = 0;
+            if (FAILED(ctx.ctrl->Disassemble(cur, 0, disBuf, sizeof(disBuf), nullptr, &nextOff))) {
+                break;
+            }
+            for (char* p = disBuf; *p; ++p) {
+                if (*p == '\r' || *p == '\n') { *p = '\0'; break; }
+            }
+
+            // Check if disasm contains transfer mnemonics (call, jmp, jcc, ret, syscall)
+            if (strstr(disBuf, "call") || strstr(disBuf, "jmp") || strstr(disBuf, "ret") ||
+                strstr(disBuf, "j") || strstr(disBuf, "syscall") || strstr(disBuf, "sysenter")) {
+                transferCount++;
+                ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+                    L"  %02lu  0x%016llx  %S\n",
+                    static_cast<unsigned long>(transferCount),
+                    static_cast<unsigned long long>(cur),
+                    disBuf);
+            }
+
+            if (nextOff <= cur) break;
+            cur = nextOff;
+        }
+
+        ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
+            L"\n  [+] Complete: %lu transfers identified across %lu instructions\n\n",
+            static_cast<unsigned long>(transferCount),
+            static_cast<unsigned long>(maxInsn));
+    }
+
+    return S_OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -177,6 +660,7 @@ static HRESULT RunPhaseWatch(const DebugContext& ctx, const wchar_t* arg) {
         L"+==============================================================+\n"
         L"|  WATCH : Hardware Exec BP + Target Profile                   |\n"
         L"+==============================================================+\n");
+
     if (!arg || wcslen(arg) == 0) {
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"\n[-] Usage: !cft watch <sym|addr>\n"
@@ -396,19 +880,25 @@ static const CftPhaseEntry kCftPhases[] = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
-                      const wchar_t* arg) {
+                      const wchar_t* arg, const wchar_t* extraArg) {
     const bool runAll = (subcommand == nullptr || wcslen(subcommand) == 0);
+
+    // If user ran `!cft trace` or `!ctf trace`
+    if (subcommand && (_wcsicmp(subcommand, L"trace") == 0 || _wcsicmp(subcommand, L"ctf") == 0)) {
+        return RunPhaseTrace(ctx, arg, extraArg);
+    }
 
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"================================================================\n"
-        L"  StructScan !cft v4.0  --  Control Flow Transfer Auto-Analyzer\n"
+        L"  StructScan !cft / !ctf v4.0  --  Control Flow Transfer Tracer\n"
         L"================================================================\n"
         L"\n"
+        L"  Tracing    : trace [sym|addr] [count] (ARM64 CTF branch tracer)\n"
+        L"  Live State : snap                     (PC, regs, disasm, stack, entropy)\n"
+        L"  Breakpoint : watch <sym|addr>         (Hardware BP + profile)\n"
         L"  Structural : trap | syscall | threads | cfg | ldr\n"
-        L"  Live       : snap\n"
-        L"  Breakpoint : watch <sym|addr>\n"
-        L"  (no args   : run all phases except watch)\n");
+        L"  (no args   : run all 6 phases except watch and trace)\n");
 
     if (!runAll) {
         for (const auto& phase : kCftPhases) {
@@ -418,12 +908,12 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
         }
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"\n[-] Unknown subcommand: '%s'\n"
-            L"    Valid: snap | trap | syscall | threads | cfg | ldr | watch <sym|addr>\n",
+            L"    Valid: trace | snap | watch | trap | syscall | threads | cfg | ldr\n",
             subcommand);
         return E_INVALIDARG;
     }
 
-    // All-phases mode: sequential, continue on failure, skip watch (needs arg)
+    // All-phases mode: sequential, continue on failure, skip watch and trace
     HRESULT worst = S_OK;
     int completed = 0, skipped = 0;
 

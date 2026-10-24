@@ -31,6 +31,7 @@ __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Ver
 __declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void);
 __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 __declspec(dllexport) HRESULT CALLBACK cft(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
+__declspec(dllexport) HRESULT CALLBACK ctf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 __declspec(dllexport) HRESULT CALLBACK uaf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 
 #ifdef __cplusplus
@@ -398,7 +399,8 @@ HRESULT DoUafAnalysis(
 HRESULT DoCftAnalysis(
     const DebugContext& ctx,
     const wchar_t*      subcommand,  // nullptr or L"" = run all phases
-    const wchar_t*      arg          // extra arg for watch/snap; may be nullptr
+    const wchar_t*      arg,         // target sym/addr or subcommand argument
+    const wchar_t*      extraArg = nullptr // count / extra parameter
 );
 
 #endif // STRUCTSCAN_H

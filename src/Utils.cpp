@@ -35,6 +35,12 @@ ULONG64 ResolveTarget(
         }
     }
 
+    // Try direct exact symbol lookup first (gives full 64-bit address without truncation)
+    ULONG64 exactAddr = 0;
+    if (SUCCEEDED(sym->GetOffsetByNameWide(token, &exactAddr)) && exactAddr != 0) {
+        return exactAddr;
+    }
+
     ULONG64 searchHandle = 0;
     ULONG64 result = 0;
     if (SUCCEEDED(sym->StartSymbolMatchWide(token, &searchHandle))) {
