@@ -2,7 +2,7 @@
 
 **StructScan** is a high-performance extension plugin for the WinDbg debugger (`dbgeng.dll`), designed for **automated reconstruction of undocumented data structures** (such as opaque kernel structures lacking private PDB symbols, custom driver objects, `ntdsai!gAnchor`, `nt!_OBJECT_TYPE`, etc.) and instant synthesis of ready-to-use C/C++ header definitions.
 
-Version **v4.0** features high-speed virtual memory analysis (`ReadVirtual`), automated C/C++ header synthesis (`emit`), Shannon entropy profiling (`entropy`), Bayesian field classification, multi-instance cross-referencing via `LIST_ENTRY` chains (`list`), and advanced kernel-level Use-After-Free lifetime analysis (`!uaf`).
+Version **v4.0** features high-speed virtual memory analysis (`ReadVirtual`), automated C/C++ header synthesis (`emit`), Shannon entropy profiling (`entropy`), Bayesian field classification, multi-instance cross-referencing via `LIST_ENTRY` chains (`list`), advanced kernel-level Use-After-Free lifetime analysis (`!uaf`), and cross-architecture Control Flow Transfer (CFT / CTF) tracing (`!cft` / `!ctf`).
 
 ---
 
@@ -40,7 +40,75 @@ Computes and renders Shannon entropy across 16-byte blocks to pinpoint pointers,
 0: kd> !structscan entropy nt!PsInitialSystemProcess 0x200
 ```
 
-#### 🔹 Mode 5: Use-After-Free Lifetime Analyzer (`!uaf`)
+#### 🔹 Mode 5: Control Flow Transfer & ARM CTF Tracer (`!cft` / `!ctf`)
+Comprehensive execution-flow and branch analyzer for Windows kernel and user-mode targets across **ARM64 (AArch64)** and **x64 (AMD64)** architectures.
+
+**Commands:**
+```text
+0: kd> !cft trace [sym|addr] [count]   <- ARM / x64 branch transfer tracer
+0: kd> !ctf trace [sym|addr] [count]   <- Direct alias for !cft trace
+0: kd> !cft snap                       <- Live snapshot: PC/RIP + regs + disasm + stack + entropy
+0: kd> !cft watch <sym|addr>           <- Hardware exec BP + prologue scan + entropy
+0: kd> !cft                            <- Automated 6-phase structural analysis
+```
+
+**Features & Capabilities:**
+- **ARM64 (AArch64) Branch Decoder**: Decodes and classifies all transfer instructions:
+  - Direct Calls: `bl` (computes target address `PC + imm26*4` and resolves symbols)
+  - Indirect Calls: `blr xN` (queries live register value `xN` and flags `[CFG-TARGET]`)
+  - PAC Indirect Calls: `blraa`, `blrab` (Pointer Authentication Keys A & B)
+  - Direct & Indirect Jumps: `b`, `br xN`, `braa`, `brab`
+  - Conditional Branches: `b.<cond>`, `cbz`, `cbnz`, `tbz`, `tbnz`
+  - Returns: `ret` (inspects `lr`/`x30` register destination and verifies stack return integrity)
+  - PAC Returns: `retaa`, `retab` (validates return address authentication via `SP`)
+  - System & Exception Transitions: `svc` (syscalls), `eret` (exception returns), `brk`
+- **Security Invariants & Validation**:
+  - Verifies 4-byte ARM64 instruction alignment (`[!] UNALIGNED DEST`)
+  - Flags unexpected Kernel -> User address transitions
+  - Audits Control Flow Guard (CFG) indirect call targets
+- **Live State Snapshot (`!cft snap`)**:
+  - Universal PC / RIP / EIP instruction pointer extraction
+  - Live register dump and 20-instruction disassembly from current PC
+  - 20-frame call stack unwinding (`k 20`)
+  - 256-byte Shannon entropy heatmap at PC (detects trampolines, packers, JOP dispatchers)
+  - Bayesian field classification of frame context (`PC - 0x40`)
+- **Hardware Watchpoint Setup (`!cft watch`)**:
+  - Sets hardware execution breakpoint (`ba e 1 <addr>`) without patching memory
+  - Pre-analyzes target prologue structure and entropy
+
+**Sample ARM64 Output (`!ctf trace nt!KiSystemService 40`):**
+```text
++==============================================================+
+|  ARM / x64 CONTROL FLOW TRANSFER TRACER (CFT / CTF)          |
++==============================================================+
+
+  Target       : nt!KiSystemService (0x000000009de361c0)
+  Instructions : 40
+  Architecture : ARM64 (AArch64)
+
+  #   Offset   Address               Type            Instruction & Target
+  --  -------  --------------------  --------------  ---------------------------------------------------
+  01  +0x0034  0x000000009de361f4  COND_BRANCH     beq  nt!KiSystemService+0x4c -> 0xfffff8019de3620c (nt!KiSystemService+0x4c)
+  02  +0x003c  0x000000009de361fc  COND_BRANCH     beq  nt!KiSystemService+0x48 -> 0xfffff8019de36208 (nt!KiSystemService+0x48)
+  03  +0x005c  0x000000009de3621c  COND_BRANCH     bhs  nt!KiSystemServiceCopyEnd+0x44 -> 0xfffff8019de3632c (nt!KiSystemServiceCopyEnd+0x44)
+  04  +0x0068  0x000000009de36228  CBZ             cbz  x9,nt!KiSystemServiceGdiTebAccess+0x2c -> 0xfffff8019de3625c
+  05  +0x0074  0x000000009de36234  CBZ             cbz  x8,nt!KiSystemServiceGdiTebAccess+0x2c -> 0xfffff8019de3625c
+  06  +0x0090  0x000000009de36250  CALL            bl   nt!PsInvokeWin32Callout -> 0xfffff8019e101e80 (nt!PsInvokeWin32Callout)
+
+  --- Control Flow Transfer Summary ---
+  Instructions scanned : 40
+  Control transfers    : 6 (15.0% of code)
+  Direct Calls (BL)    : 1
+  Indirect Calls (BLR) : 0
+  Direct Jumps (B)     : 0
+  Indirect Jumps (BR)  : 0
+  Cond Branches        : 5
+  Returns (RET/PAC)    : 0
+  PAC Authenticated    : 0
+  Syscalls/Exceptions  : 0
+```
+
+#### 🔹 Mode 6: Use-After-Free Lifetime Analyzer (`!uaf`)
 Multi-phase kernel object lifetime analysis designed to detect Use-After-Free conditions, memory reclamation patterns, and dangling pointer references.
 
 **Formal Verification Model:**
@@ -120,7 +188,6 @@ ALLOC(O) → LIVE(O) → FREE(O) → [REUSE(O)] → USE(O)
 0: kd> !structscan unload
 [+] Run: .unload structscan
 ```
-
 ---
 
 ## 📊 Sample Synthesized C/C++ Header (`!structscan emit`)
@@ -199,7 +266,8 @@ structscan/
 │   ├── ListCrossRefEngine.cpp# LIST_ENTRY crawler and multi-instance profile analysis
 │   ├── HeaderSynthesizer.cpp # C/C++ header code synthesizer
 │   ├── EntropyEngine.cpp     # Shannon entropy heatmap engine
-│   └── UafEngine.cpp         # 5-phase Use-After-Free lifetime analysis engine
+│   ├── UafEngine.cpp         # 5-phase Use-After-Free lifetime analysis engine
+│   └── CftEngine.cpp         # Control Flow Transfer (CFT / CTF) tracing engine
 ├── bin/
 │   ├── structscan_arm64.dll  # Native ARM64 (AArch64) Windows binary
 │   └── structscan_x64.dll    # Native x64 (AMD64) Windows binary
