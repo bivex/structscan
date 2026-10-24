@@ -26,12 +26,15 @@ struct ScopedDebugInterfaces {
         if (FAILED(client->QueryInterface(__uuidof(IDebugControl4),    reinterpret_cast<void**>(&ctx.ctrl)))) return false;
         if (FAILED(client->QueryInterface(__uuidof(IDebugSymbols4),    reinterpret_cast<void**>(&ctx.sym))))  return false;
         if (FAILED(client->QueryInterface(__uuidof(IDebugDataSpaces4), reinterpret_cast<void**>(&ctx.ds))))   return false;
+        // IDebugRegisters2 is optional — not available in dump-only sessions
+        client->QueryInterface(__uuidof(IDebugRegisters2), reinterpret_cast<void**>(&ctx.regs));
         return true;
     }
 
     ~ScopedDebugInterfaces() {
-        if (ctx.ds)   { ctx.ds->Release();   ctx.ds = nullptr; }
-        if (ctx.sym)  { ctx.sym->Release();  ctx.sym = nullptr; }
+        if (ctx.regs) { ctx.regs->Release(); ctx.regs = nullptr; }
+        if (ctx.ds)   { ctx.ds->Release();   ctx.ds   = nullptr; }
+        if (ctx.sym)  { ctx.sym->Release();  ctx.sym  = nullptr; }
         if (ctx.ctrl) { ctx.ctrl->Release(); ctx.ctrl = nullptr; }
     }
 };
@@ -74,6 +77,8 @@ static void PrintStructscanUsage(IDebugControl4* ctrl) {
         L"   !structscan emit <sym|addr> [size]     - Synthesize C/C++ struct header\n"
         L"   !structscan entropy <sym|addr> [size]  - Shannon entropy heatmap\n"
         L"   !structscan unload                     - Unload hint\n\n"
+        L"   !cft [trap|syscall|threads|cfg|ldr]    - Control flow auto-analyzer\n"
+        L"   !uaf <sym|addr> [size] [searchbytes]   - Use-After-Free analyzer\n\n"
         L" EXAMPLES:\n"
         L"   !structscan nt!PsInitialSystemProcess 0x400\n"
         L"   !structscan emit nt!KdDebuggerDataBlock 0x400\n"
@@ -190,4 +195,17 @@ __declspec(dllexport) HRESULT CALLBACK uaf(_In_ IDebugClient* Client, _In_opt_ P
     params.searchBytes = ParseHexWithDefault(parsed.tok2, 0x8000);
 
     return DoUafAnalysis(dbg.ctx, params);
+}
+
+__declspec(dllexport) HRESULT CALLBACK cft(_In_ IDebugClient* Client, _In_opt_ PCSTR Args) {
+    ScopedDebugInterfaces dbg;
+    if (!dbg.Acquire(Client)) return E_FAIL;
+
+    // Parse up to two tokens: subcommand + optional argument
+    // e.g. "watch nt!KiSystemCall64"  →  tok0="watch"  tok1="nt!KiSystemCall64"
+    CommandArgs parsed = ParseCommandArgs(Args ? Args : "");
+    const wchar_t* sub = (parsed.count >= 1 && wcslen(parsed.tok0) > 0) ? parsed.tok0 : nullptr;
+    const wchar_t* arg = (parsed.count >= 2 && wcslen(parsed.tok1) > 0) ? parsed.tok1 : nullptr;
+
+    return DoCftAnalysis(dbg.ctx, sub, arg);
 }

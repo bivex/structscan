@@ -26,7 +26,7 @@ echo "[+] Building StructScan (x64) using $COMPILER..."
     src/HeaderSynthesizer.cpp \
     src/EntropyEngine.cpp \
     src/UafEngine.cpp \
-    -o bin/structscan_x64.dll \
+    src/CftEngine.cpp \
     -ldbgeng -ldbghelp \
     -static-libgcc -static-libstdc++ \
     -Wl,--enable-auto-image-base

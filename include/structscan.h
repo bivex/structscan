@@ -30,7 +30,7 @@ extern "C" {
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags);
 __declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void);
 __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
-__declspec(dllexport) HRESULT CALLBACK uaf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
+__declspec(dllexport) HRESULT CALLBACK cft(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 
 #ifdef __cplusplus
 }
@@ -51,6 +51,7 @@ struct DebugContext {
     IDebugControl4*    ctrl{nullptr};
     IDebugSymbols4*    sym{nullptr};
     IDebugDataSpaces4* ds{nullptr};
+    IDebugRegisters2*  regs{nullptr};  // nullable: live sessions only
 };
 
 struct ModuleInfo {
@@ -391,6 +392,12 @@ HRESULT DoEntropyMap(
 HRESULT DoUafAnalysis(
     const DebugContext&  ctx,
     const UafScanParams& params
+);
+
+HRESULT DoCftAnalysis(
+    const DebugContext& ctx,
+    const wchar_t*      subcommand,  // nullptr or L"" = run all phases
+    const wchar_t*      arg          // extra arg for watch/snap; may be nullptr
 );
 
 #endif // STRUCTSCAN_H

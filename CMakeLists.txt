@@ -15,6 +15,7 @@ set(SOURCES
     src/HeaderSynthesizer.cpp
     src/EntropyEngine.cpp
     src/UafEngine.cpp
+    src/CftEngine.cpp
 )
 
 add_library(structscan SHARED ${SOURCES})
