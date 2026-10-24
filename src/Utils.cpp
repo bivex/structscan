@@ -5,6 +5,7 @@
 
 #include "../include/structscan.h"
 #include <cwchar>
+#include <cstdlib>
 
 ULONG64 ResolveTarget(
     IDebugSymbols4* sym,
@@ -13,10 +14,27 @@ ULONG64 ResolveTarget(
 ) {
     if (!token || !sym) return 0;
 
+    // Clean backtick (`) which WinDbg uses in 64-bit addresses (e.g. fffff801`9de361c0)
+    wchar_t cleanToken[128] = {};
+    size_t ci = 0;
+    for (size_t i = 0; token[i] && ci + 1 < _countof(cleanToken); ++i) {
+        if (token[i] != L'`') {
+            cleanToken[ci++] = token[i];
+        }
+    }
+    cleanToken[ci] = L'\0';
     wchar_t* end = nullptr;
-    ULONG64 addr = wcstoull(token, &end, 16);
-    if (end != token && *end == L'\0' && addr >= 0x10000) return addr;
-
+    ULONG64 addr = std::wcstoull(cleanToken, &end, 16);
+    if (end != cleanToken && *end == L'\0' && addr >= 0x10000) {
+        // If truncated 32-bit kernel pointer on 64-bit target, restore high 32 bits from kernel base
+        if ((addr & 0xFFFFFFFF00000000ULL) == 0 && (addr & 0x80000000ULL) != 0) {
+            ULONG64 ntBase = 0;
+            if (SUCCEEDED(sym->GetModuleByModuleNameWide(L"nt", 0, nullptr, &ntBase)) && ntBase > 0xFFFFFFFF00000000ULL) {
+                addr |= (ntBase & 0xFFFFFFFF00000000ULL);
+            }
+        }
+        return addr;
+    }
     wchar_t modName[128] = {};
     const wchar_t* bang = wcschr(token, L'!');
     if (bang) {
@@ -46,6 +64,12 @@ ULONG64 ResolveTarget(
     if (SUCCEEDED(sym->StartSymbolMatchWide(token, &searchHandle))) {
         sym->GetNextSymbolMatch(searchHandle, nullptr, 0, 0, &result);
         sym->EndSymbolMatch(searchHandle);
+    }
+    if (result != 0 && (result & 0xFFFFFFFF00000000ULL) == 0 && (result & 0x80000000ULL) != 0) {
+        ULONG64 ntBase = 0;
+        if (SUCCEEDED(sym->GetModuleByModuleNameWide(L"nt", 0, nullptr, &ntBase)) && ntBase > 0xFFFFFFFF00000000ULL) {
+            result |= (ntBase & 0xFFFFFFFF00000000ULL);
+        }
     }
     return result;
 }

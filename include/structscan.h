@@ -15,6 +15,7 @@
 #include <vector>
 #include <memory>
 #include <cstdint>
+#include <cstdlib>
 #include <array>
 #include <algorithm>
 #include <numeric>
