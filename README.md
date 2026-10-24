@@ -40,10 +40,19 @@ Computes and renders Shannon entropy across 16-byte blocks to pinpoint pointers,
 0: kd> !structscan entropy nt!PsInitialSystemProcess 0x200
 ```
 
-#### 🔹 Mode 5: Control Flow Transfer (CFT) Tracer (`!cft`)
-Comprehensive execution-flow and branch analyzer for Windows kernel and user-mode targets across **ARM64 (AArch64)** and **x64 (AMD64)** architectures.
+#### 🔹 Mode 5: Control Flow Transfer (CFT) Engine (`!cft`)
+Comprehensive execution-flow tracer, PE structure analyzer, and branch correlator for Windows kernel and user-mode targets across **ARM64 (AArch64)** and **x64 (AMD64)** architectures.
 
-**Commands:**
+**Control-Flow Transfer Categories:**
+
+| Transfer Category | ARM64 Instructions | x64 Instructions | Security & Audit Invariants |
+|---|---|---|---|
+| **Direct Call** | `bl` | `call rel32` | Callee symbol resolution, module boundaries, import tables |
+| **Indirect Call** | `blr`, `blraa`, `blrab` | `call reg`, `call [mem]` | Runtime pointer origin, CFG bitmap validity, PAC key verification |
+| **Direct Jump** | `b`, `b.cond`, `cbz`, `tbz` | `jmp rel32`, `jcc` | Intra-procedural edge linking, taken/not-taken branch conditions |
+| **Indirect Jump / Return** | `br`, `ret`, `retaa`, `retab` | `jmp reg`, `ret` | Target calculation, return address stack integrity (ROP/JOP check) |
+
+**Subcommands:**
 ```text
 0: kd> !cft pe [module|addr]          <- PE header, sections, CFG & entry point analyzer
 0: kd> !cft map [module|addr] [max]   <- Control-flow graph potential edges discovery
@@ -53,31 +62,124 @@ Comprehensive execution-flow and branch analyzer for Windows kernel and user-mod
 0: kd> !cft watch <sym|addr>          <- Hardware exec BP + prologue scan + entropy
 0: kd> !cft                           <- Automated 6-phase structural analysis
 ```
-**Features & Capabilities:**
-- **ARM64 (AArch64) Branch Decoder**: Decodes and classifies all transfer instructions:
-  - Direct Calls: `bl` (computes target address `PC + imm26*4` and resolves symbols)
-  - Indirect Calls: `blr xN` (queries live register value `xN` and flags `[CFG-TARGET]`)
-  - PAC Indirect Calls: `blraa`, `blrab` (Pointer Authentication Keys A & B)
-  - Direct & Indirect Jumps: `b`, `br xN`, `braa`, `brab`
-  - Conditional Branches: `b.<cond>`, `cbz`, `cbnz`, `tbz`, `tbnz`
-  - Returns: `ret` (inspects `lr`/`x30` register destination and verifies stack return integrity)
-  - PAC Returns: `retaa`, `retab` (validates return address authentication via `SP`)
-  - System & Exception Transitions: `svc` (syscalls), `eret` (exception returns), `brk`
-- **Security Invariants & Validation**:
-  - Verifies 4-byte ARM64 instruction alignment (`[!] UNALIGNED DEST`)
-  - Flags unexpected Kernel -> User address transitions
-  - Audits Control Flow Guard (CFG) indirect call targets
-- **Live State Snapshot (`!cft snap`)**:
-  - Universal PC / RIP / EIP instruction pointer extraction
-  - Live register dump and 20-instruction disassembly from current PC
-  - 20-frame call stack unwinding (`k 20`)
-  - 256-byte Shannon entropy heatmap at PC (detects trampolines, packers, JOP dispatchers)
-  - Bayesian field classification of frame context (`PC - 0x40`)
-- **Hardware Watchpoint Setup (`!cft watch`)**:
-  - Sets hardware execution breakpoint (`ba e 1 <addr>`) without patching memory
-  - Pre-analyzes target prologue structure and entropy
 
-**Sample ARM64 Output (`!cft trace nt!KiSystemService 40`):**
+---
+
+##### 1. PE Header & Entry Point Analyzer (`!cft pe`)
+Parses `IMAGE_DOS_HEADER` (`MZ`) and `IMAGE_NT_HEADERS64` directly from virtual memory:
+- Calculates virtual address: `AddressOfEntryPoint (RVA) -> VA`.
+- **EntryPoint Hook Detector**: Decodes initial instructions at the entrypoint to detect hooks or trampolines (`b`/`br` on ARM64, `jmp` on x64).
+- Security flags: **Control Flow Guard (CFG)**, **High Entropy ASLR**, **NX/DEP**.
+- Memory section map with permissions (`R-X`, `RW-`, `R--`) marking executable regions.
+
+**Sample Output (`!cft pe nt`):**
+```text
++==============================================================+
+|  PE IMAGE & ENTRY POINT ANALYZER (CFT)                       |
++==============================================================+
+
+  Module Name       : nt
+  Image Base        : 0x000000009d800000
+  Size of Image     : 0x0124a000 (18728 KB)
+  Architecture      : ARM64 (AArch64) (0xaa64)
+  Number of Sections: 34
+
+  --- Entry Point (Initial Control Transfer) ---
+  AddressOfEntryPoint: RVA +0x00a96bc0  ->  VA 0x000000009e296bc0  (nt!KiSystemStartup+0x0)
+  Hook Status        : [OK] Normal entry point prologue (unpatched)
+
+  --- Security & Control Flow Integrity ---
+  Control Flow Guard (CFG) : ENABLED
+  High Entropy ASLR (64-bit): ENABLED
+  NX / DEP Compatibility   : ENABLED
+
+  --- Section Table (Memory Regions) ---
+  Name      RVA         VirtualSize  RawSize     Flags       Characteristics
+  --------  ----------  -----------  ----------  ----------  --------------------------------
+  .rdata    +0x00001000  0x0009a0d0   0x0009a200  R--         [DATA / READONLY]
+  .pdata    +0x0009c000  0x0003dda8   0x0003de00  R--         [DATA / READONLY]
+  .text     +0x00200000  0x0046df04   0x0046e000  R-X         [EXECUTABLE CODE REGION]
+  PAGE      +0x0066e000  0x00422ba0   0x00422c00  R-X         [EXECUTABLE CODE REGION]
+```
+
+---
+
+##### 2. Control Flow Graph Edge Discovery (`!cft map`)
+Scans executable sections of a target PE image to discover and map all potential control-flow edges:
+- Identifies direct calls, indirect calls, direct jumps, conditional branches, and returns.
+- Categorizes edge scopes:
+  - `INTERNAL`: Target is within the same module.
+  - `CROSS_MOD`: Inter-modular API transition.
+  - `INDIR_DYN`: Runtime-computed destination (requires CFG monitoring).
+
+**Sample Output (`!cft map nt 25`):**
+```text
++==============================================================+
+|  CONTROL FLOW GRAPH (CFG) POTENTIAL EDGE MAP                 |
++==============================================================+
+
+  Target Module : nt (0x000000009d800000)
+  Architecture  : ARM64 (AArch64)
+  Max Edges     : 25
+
+  #   Source RVA   Type            Target Address / Target Symbol             Scope
+  --  -----------  --------------  -----------------------------------------  -------------
+  01  +0x0020001c   CALL            0xfffff8019dc7c840 (nt!_report_gsfailure)  INTERNAL
+  03  +0x00200050   CALL            0xfffff8019de2bbf4 (nt!HalpSaveProcessorState)  INTERNAL
+  04  +0x00200054   CBNZ            0xfffff8019da00074 (nt!HalpProcessorHaltInternal)  INTERNAL
+  09  +0x002000a8   INDIR_JUMP      [reg x1] (runtime computed)                INDIR_DYN
+  13  +0x002001a4   INDIR_CALL      [reg x6] (runtime computed)                INDIR_DYN
+  22  +0x00200298   RETURN          [reg x30] (runtime computed)               INDIR_DYN
+
+  --- Control-Flow Map Summary ---
+  Potential edges mapped: 25
+  Internal module edges : 13
+  Cross-module API calls: 0
+  Indirect/dynamic edges: 11 (require runtime monitoring)
+```
+
+---
+
+##### 3. Transition Context Correlator (`!cft edge`)
+Performs deep inspection on a specific control-flow edge between `source` and `destination`:
+- Verifies module membership of both endpoints.
+- Verifies 4-byte instruction alignment on ARM64 (`[!] UNALIGNED DEST`).
+- Flags transitions into non-module / dynamic memory (heap/pool execution / shellcode).
+- Disassembles 5 instructions leading to the branch and 5 instructions at the destination (including PAC `pacibsp` verification).
+
+**Sample Output (`!cft edge nt!KiSystemService nt!PsInvokeWin32Callout`):**
+```text
++==============================================================+
+|  TRANSITION CONTEXT INSPECTION & CORRELATOR (CFT)            |
++==============================================================+
+
+  Source Address : 0x000000009de361c0 (nt!KiSystemService+0x0)
+  Target Address : 0x000000009e101e80 (nt!PsInvokeWin32Callout+0x0)
+
+  --- Transition Integrity Checks ---
+  [OK] Target address is properly aligned.
+  [OK] Intra-module transition (within nt).
+
+  --- Source Transition Instructions ---
+nt!KiSystemService:
+fffff801`9de361c0 d101c3ff sub         sp,sp,#0x70
+fffff801`9de361c4 a9057bfd stp         fp,lr,[sp,#0x50]
+
+  --- Target Destination Instructions ---
+nt!PsInvokeWin32Callout:
+fffff801`9e101e80 d503237f pacibsp
+fffff801`9e101e84 a9be53f3 stp         x19,x20,[sp,#-0x20]!
+```
+
+---
+
+##### 4. Dynamic Branch Tracer (`!cft trace`)
+Analyzes instructions starting at any address or current `PC`/`RIP`:
+- **ARM64 Branch Decoder**: decodes `bl`, `blr`, `blraa`, `b`, `br`, `braa`, `b.cond`, `cbz`, `tbnz`, `ret`, `retaa`, `svc`, `eret`.
+- **Register Inspection**: queries live register values (`xN`, `lr`) for indirect targets and resolves symbols.
+- **Statistical Summary**: counts calls, jumps, conditional branches, returns, and PAC authentications.
+
+**Sample Output (`!cft trace nt!KiSystemService 40`):**
 ```text
 +==============================================================+
 |  ARM / x64 CONTROL FLOW TRANSFER TRACER (CFT)                |
@@ -108,6 +210,33 @@ Comprehensive execution-flow and branch analyzer for Windows kernel and user-mod
   PAC Authenticated    : 0
   Syscalls/Exceptions  : 0
 ```
+
+---
+
+##### 5. PE Loading Analysis Workflow
+To trap and analyze when a new PE image (driver or DLL) is mapped into memory:
+1. **Enable module load trap**:
+   ```text
+   0: kd> sxe ld:mydriver.sys
+   0: kd> g
+   ```
+2. **Capture loader state on break**:
+   ```text
+   0: kd> !cft snap
+   ```
+3. **Analyze the newly mapped PE structure**:
+   ```text
+   0: kd> !cft pe mydriver
+   ```
+4. **Map potential control-flow edges**:
+   ```text
+   0: kd> !cft map mydriver 64
+   ```
+5. **Set execution watchpoint on the EntryPoint**:
+   ```text
+   0: kd> !cft watch <EntryPoint_VA>
+   0: kd> g
+   ```
 
 #### 🔹 Mode 6: Use-After-Free Lifetime Analyzer (`!uaf`)
 Multi-phase kernel object lifetime analysis designed to detect Use-After-Free conditions, memory reclamation patterns, and dangling pointer references.
