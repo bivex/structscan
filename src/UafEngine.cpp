@@ -330,7 +330,7 @@ struct UafAnalysisState {
 };
 
 static void ExecutePhase1_PoolHeader(const UafContext& ctx, UafAnalysisState& state) {
-    Sep(ctx.debug.ctrl, L"PHASE 1 · Pool Header Analysis  (object - 0x10)");
+    Sep(ctx.debug.ctrl, L"PHASE 1 : Pool Header Analysis  (object - 0x10)");
     state.pool = AnalyzePoolHeader(ctx.debug.ds, ctx.targetAddr);
 
     if (!state.pool.readable) {
@@ -391,7 +391,7 @@ static void ExecutePhase1_PoolHeader(const UafContext& ctx, UafAnalysisState& st
 }
 
 static void ExecutePhase2_ObjectHeader(const UafContext& ctx, UafAnalysisState& state) {
-    Sep(ctx.debug.ctrl, L"PHASE 2 · OBJECT_HEADER Analysis  (object - 0x30)");
+    Sep(ctx.debug.ctrl, L"PHASE 2 : OBJECT_HEADER Analysis  (object - 0x30)");
     state.oh = AnalyzeObjectHeader(ctx.debug.ds, ctx.targetAddr);
 
     if (!state.oh.readable) {
@@ -419,8 +419,7 @@ static void ExecutePhase2_ObjectHeader(const UafContext& ctx, UafAnalysisState& 
 
     if (state.oh.refCountsSuspect) {
         ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  [!] Reference counts are SUSPECT — object may be freed/corrupted\n");
-        state.riskScore += 30;
+            L"  [!] Reference counts are SUSPECT -- object may be freed/corrupted\n");
         state.evidenceItems++;
     } else if (state.oh.pointerCount > 0 && state.oh.handleCount >= 0 && state.oh.typeIndex > 0) {
         ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
@@ -468,15 +467,14 @@ static void InspectFieldClassifier(const UafContext& ctx, UafAnalysisState& stat
         }
         if (fieldCount == 0) {
             ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-                L"  (no high-confidence fields — object may be zeroed or freed)\n");
-            state.riskScore += 10;
+                L"  (no high-confidence fields -- object may be zeroed or freed)\n");
             state.evidenceItems++;
         }
     }
 }
 
 static void ExecutePhase3_Content(const UafContext& ctx, UafAnalysisState& state) {
-    Sep(ctx.debug.ctrl, L"PHASE 3 · Content Analysis (entropy + field classifier)");
+    Sep(ctx.debug.ctrl, L"PHASE 3 : Content Analysis (entropy + field classifier)");
 
     state.content = AnalyzeContent(ctx.debug.ds, ctx.targetAddr, ctx.params.objSize);
     if (!state.content.readable) {
@@ -494,7 +492,7 @@ static void ExecutePhase3_Content(const UafContext& ctx, UafAnalysisState& state
 
     if (state.content.looksCorrupted) {
         ctx.debug.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"  [!] Very low entropy / large zero region — content SUSPECT\n"
+            L"  [!] Very low entropy / large zero region -- content SUSPECT\n"
             L"      (freed allocator may zero memory or leave freelist ptrs)\n");
         state.riskScore += 20;
         state.evidenceItems++;
@@ -508,7 +506,7 @@ static void ExecutePhase3_Content(const UafContext& ctx, UafAnalysisState& state
 }
 
 static void ExecutePhase4_DanglingRefs(const UafContext& ctx, UafAnalysisState& state) {
-    Sep(ctx.debug.ctrl, L"PHASE 4 · Dangling Reference Scan");
+    Sep(ctx.debug.ctrl, L"PHASE 4 : Dangling Reference Scan");
 
     ULONG64 scanStart = (ctx.targetAddr > static_cast<ULONG64>(ctx.params.searchBytes) / 2)
                         ? ctx.targetAddr - ctx.params.searchBytes / 2

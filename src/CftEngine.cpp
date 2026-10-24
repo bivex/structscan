@@ -24,20 +24,20 @@
 static void PrintPhaseHeader(IDebugControl4* ctrl, int phase, const wchar_t* title) {
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
-        L"╔══════════════════════════════════════════════════════════════╗\n"
-        L"║  PHASE %d · %-51s║\n"
-        L"╚══════════════════════════════════════════════════════════════╝\n",
+        L"+==============================================================+\n"
+        L"|  PHASE %d : %-48s |\n"
+        L"+==============================================================+\n",
         phase, title);
 }
 
 static void PrintSectionHeader(IDebugControl4* ctrl, const wchar_t* title) {
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"\n  ── %s ──\n\n", title);
+        L"\n  --- %s ---\n\n", title);
 }
 
 static void PrintPhaseSkip(IDebugControl4* ctrl, const wchar_t* sym, const wchar_t* reason) {
     ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"  [SKIP] %s — %s\n", sym, reason);
+        L"  [SKIP] %s - %s\n", sym, reason);
 }
 
 static bool SymbolExists(IDebugSymbols4* sym, const wchar_t* name) {
@@ -78,14 +78,14 @@ static HRESULT RunPhaseSnap(const DebugContext& ctx, const wchar_t* /*arg*/) {
 
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
-        L"╔══════════════════════════════════════════════════════════════╗\n"
-        L"║  SNAP · Live Execution State at Current %-3s                  ║\n"
-        L"╚══════════════════════════════════════════════════════════════╝\n",
+        L"+==============================================================+\n"
+        L"|  SNAP : Live Execution State at Current %-3s                 |\n"
+        L"+==============================================================+\n",
         ipRegName);
 
     if (!ctx.regs) {
         PrintPhaseSkip(ctx.ctrl, L"IDebugRegisters2",
-            L"not available — requires live kernel or user-mode session (not dump)");
+            L"not available - requires live kernel or user-mode session (not dump)");
         return S_OK;
     }
 
@@ -174,10 +174,9 @@ static HRESULT RunPhaseSnap(const DebugContext& ctx, const wchar_t* /*arg*/) {
 static HRESULT RunPhaseWatch(const DebugContext& ctx, const wchar_t* arg) {
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
-        L"╔══════════════════════════════════════════════════════════════╗\n"
-        L"║  WATCH · Hardware Exec BP + Target Profile                   ║\n"
-        L"╚══════════════════════════════════════════════════════════════╝\n");
-
+        L"+==============================================================+\n"
+        L"|  WATCH : Hardware Exec BP + Target Profile                   |\n"
+        L"+==============================================================+\n");
     if (!arg || wcslen(arg) == 0) {
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"\n[-] Usage: !cft watch <sym|addr>\n"
@@ -231,7 +230,7 @@ static HRESULT RunPhaseWatch(const DebugContext& ctx, const wchar_t* arg) {
 
     const wchar_t* ipRegName = GetIpRegisterName(ctx.ctrl);
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-        L"\n  [*] Type 'g' to continue — WinDbg will break when %s reaches 0x%016llx\n",
+        L"\n  [*] Type 'g' to continue -- WinDbg will break when %s reaches 0x%016llx\n",
         ipRegName, static_cast<unsigned long long>(addr));
 
     return S_OK;
@@ -441,7 +440,7 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"================================================================\n"
-        L"  !cft complete — %d phases done, %d skipped/failed\n"
+        L"  !cft complete -- %d phases done, %d skipped/failed\n"
         L"================================================================\n\n",
         completed, skipped);
 
