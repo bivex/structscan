@@ -23,9 +23,17 @@ add_library(structscan SHARED ${SOURCES})
 target_link_libraries(structscan PRIVATE dbgeng dbghelp)
 
 # Standalone DLL configuration
+if(NOT DEFINED STRUCTSCAN_OUTPUT_NAME)
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64" OR CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "ARM64")
+        set(STRUCTSCAN_OUTPUT_NAME "structscan_arm64")
+    else()
+        set(STRUCTSCAN_OUTPUT_NAME "structscan_x64")
+    endif()
+endif()
+
 set_target_properties(structscan PROPERTIES
     PREFIX ""
-    OUTPUT_NAME "structscan_x64"
+    OUTPUT_NAME "${STRUCTSCAN_OUTPUT_NAME}"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin"
 )

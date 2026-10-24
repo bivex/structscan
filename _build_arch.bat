@@ -24,6 +24,7 @@ cmake -S "%~3" -B "%~4" ^
     -DCMAKE_C_COMPILER=cl ^
     -DCMAKE_CXX_COMPILER=cl ^
     -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL ^
+    "-DSTRUCTSCAN_OUTPUT_NAME=structscan_%~1" ^
     --no-warn-unused-cli
 if errorlevel 1 ( echo [FAIL] cmake configure failed & exit /b 1 )
 
