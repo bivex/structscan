@@ -32,7 +32,6 @@ __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Ver
 __declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void);
 __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 __declspec(dllexport) HRESULT CALLBACK cft(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
-__declspec(dllexport) HRESULT CALLBACK ctf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 __declspec(dllexport) HRESULT CALLBACK uaf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 
 #ifdef __cplusplus

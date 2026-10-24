@@ -2,7 +2,7 @@
 
 **StructScan** is a high-performance extension plugin for the WinDbg debugger (`dbgeng.dll`), designed for **automated reconstruction of undocumented data structures** (such as opaque kernel structures lacking private PDB symbols, custom driver objects, `ntdsai!gAnchor`, `nt!_OBJECT_TYPE`, etc.) and instant synthesis of ready-to-use C/C++ header definitions.
 
-Version **v4.0** features high-speed virtual memory analysis (`ReadVirtual`), automated C/C++ header synthesis (`emit`), Shannon entropy profiling (`entropy`), Bayesian field classification, multi-instance cross-referencing via `LIST_ENTRY` chains (`list`), advanced kernel-level Use-After-Free lifetime analysis (`!uaf`), and cross-architecture Control Flow Transfer (CFT / CTF) tracing (`!cft` / `!ctf`).
+Version **v4.0** features high-speed virtual memory analysis (`ReadVirtual`), automated C/C++ header synthesis (`emit`), Shannon entropy profiling (`entropy`), Bayesian field classification, multi-instance cross-referencing via `LIST_ENTRY` chains (`list`), advanced kernel-level Use-After-Free lifetime analysis (`!uaf`), and cross-architecture Control Flow Transfer (CFT) tracing (`!cft`).
 
 ---
 
@@ -40,13 +40,12 @@ Computes and renders Shannon entropy across 16-byte blocks to pinpoint pointers,
 0: kd> !structscan entropy nt!PsInitialSystemProcess 0x200
 ```
 
-#### 🔹 Mode 5: Control Flow Transfer & ARM CTF Tracer (`!cft` / `!ctf`)
+#### 🔹 Mode 5: Control Flow Transfer (CFT) Tracer (`!cft`)
 Comprehensive execution-flow and branch analyzer for Windows kernel and user-mode targets across **ARM64 (AArch64)** and **x64 (AMD64)** architectures.
 
 **Commands:**
 ```text
 0: kd> !cft trace [sym|addr] [count]   <- ARM / x64 branch transfer tracer
-0: kd> !ctf trace [sym|addr] [count]   <- Direct alias for !cft trace
 0: kd> !cft snap                       <- Live snapshot: PC/RIP + regs + disasm + stack + entropy
 0: kd> !cft watch <sym|addr>           <- Hardware exec BP + prologue scan + entropy
 0: kd> !cft                            <- Automated 6-phase structural analysis
@@ -76,10 +75,10 @@ Comprehensive execution-flow and branch analyzer for Windows kernel and user-mod
   - Sets hardware execution breakpoint (`ba e 1 <addr>`) without patching memory
   - Pre-analyzes target prologue structure and entropy
 
-**Sample ARM64 Output (`!ctf trace nt!KiSystemService 40`):**
+**Sample ARM64 Output (`!cft trace nt!KiSystemService 40`):**
 ```text
 +==============================================================+
-|  ARM / x64 CONTROL FLOW TRANSFER TRACER (CFT / CTF)          |
+|  ARM / x64 CONTROL FLOW TRANSFER TRACER (CFT)                |
 +==============================================================+
 
   Target       : nt!KiSystemService (0x000000009de361c0)
@@ -267,7 +266,7 @@ structscan/
 │   ├── HeaderSynthesizer.cpp # C/C++ header code synthesizer
 │   ├── EntropyEngine.cpp     # Shannon entropy heatmap engine
 │   ├── UafEngine.cpp         # 5-phase Use-After-Free lifetime analysis engine
-│   └── CftEngine.cpp         # Control Flow Transfer (CFT / CTF) tracing engine
+│   └── CftEngine.cpp         # Control Flow Transfer (CFT) tracing engine
 ├── bin/
 │   ├── structscan_arm64.dll  # Native ARM64 (AArch64) Windows binary
 │   └── structscan_x64.dll    # Native x64 (AMD64) Windows binary

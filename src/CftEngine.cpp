@@ -1,10 +1,10 @@
 /**
  * @file CftEngine.cpp
- * @brief !cft / !ctf — Control Flow Transfer Auto-Analyzer & ARM CTF Tracer
+ * @brief !cft — Control Flow Transfer (CFT) Auto-Analyzer & Branch Tracer
  *
  * Subcommands:
- *   !cft / !ctf                — all structural phases + live snapshot
- *   !cft trace [sym|addr] [N]  — ARM64 / x64 Control Flow Transfer (CFT/CTF) trace
+ *   !cft                       — all structural phases + live snapshot
+ *   !cft trace [sym|addr] [N]  — ARM64 / x64 Control Flow Transfer (CFT) branch tracer
  *   !cft snap                  — live snapshot: PC/RIP + disasm + regs + stack + entropy
  *   !cft watch <sym|addr>      — Bayesian scan target + set hardware exec BP
  *   !cft trap                  — Phase 1: KTRAP_FRAME / KTHREAD C/C++ header
@@ -101,7 +101,7 @@ static bool QueryRegisterValue(IDebugRegisters2* regs, int regIdx, ULONG64* outV
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ARM64 Control Flow Transfer (CFT / CTF) Instruction Decoder
+// ARM64 Control Flow Transfer (CFT) Instruction Decoder
 // ─────────────────────────────────────────────────────────────────────────────
 
 enum class ArmBranchType {
@@ -268,14 +268,14 @@ static ArmDecodedBranch DecodeArm64Branch(uint32_t insn, ULONG64 pc) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TRACE — ARM / x64 Control Flow Transfer (CFT / CTF) Tracer
+// TRACE — ARM / x64 Control Flow Transfer (CFT) Tracer
 // ─────────────────────────────────────────────────────────────────────────────
 
 static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const wchar_t* extraArg) {
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"+==============================================================+\n"
-        L"|  ARM / x64 CONTROL FLOW TRANSFER TRACER (CFT / CTF)          |\n"
+        L"|  ARM / x64 CONTROL FLOW TRANSFER TRACER (CFT)                |\n"
         L"+==============================================================+\n");
 
     // ── 1. Determine target address ──────────────────────────────────────────
@@ -883,18 +883,18 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
                       const wchar_t* arg, const wchar_t* extraArg) {
     const bool runAll = (subcommand == nullptr || wcslen(subcommand) == 0);
 
-    // If user ran `!cft trace` or `!ctf trace`
-    if (subcommand && (_wcsicmp(subcommand, L"trace") == 0 || _wcsicmp(subcommand, L"ctf") == 0)) {
+    // If user ran `!cft trace`
+    if (subcommand && _wcsicmp(subcommand, L"trace") == 0) {
         return RunPhaseTrace(ctx, arg, extraArg);
     }
 
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"================================================================\n"
-        L"  StructScan !cft / !ctf v4.0  --  Control Flow Transfer Tracer\n"
+        L"  StructScan !cft v4.0  --  Control Flow Transfer Tracer\n"
         L"================================================================\n"
         L"\n"
-        L"  Tracing    : trace [sym|addr] [count] (ARM64 CTF branch tracer)\n"
+        L"  Tracing    : trace [sym|addr] [count] (ARM64 / x64 branch tracer)\n"
         L"  Live State : snap                     (PC, regs, disasm, stack, entropy)\n"
         L"  Breakpoint : watch <sym|addr>         (Hardware BP + profile)\n"
         L"  Structural : trap | syscall | threads | cfg | ldr\n"

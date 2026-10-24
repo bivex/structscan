@@ -77,7 +77,7 @@ static void PrintStructscanUsage(IDebugControl4* ctrl) {
         L"   !structscan emit <sym|addr> [size]     - Synthesize C/C++ struct header\n"
         L"   !structscan entropy <sym|addr> [size]  - Shannon entropy heatmap\n"
         L"   !structscan unload                     - Unload hint\n\n"
-        L"   !cft / !ctf [trace|snap|watch|trap]    - Control Flow Transfer Tracer (ARM / x64)\n"
+        L"   !cft [trace|snap|watch|trap|syscall]   - Control Flow Transfer Tracer (ARM / x64)\n"
         L"   !uaf <sym|addr> [size] [searchbytes]   - Use-After-Free analyzer\n\n"
         L" EXAMPLES:\n"
         L"   !structscan nt!PsInitialSystemProcess 0x400\n"
@@ -211,6 +211,3 @@ __declspec(dllexport) HRESULT CALLBACK cft(_In_ IDebugClient* Client, _In_opt_ P
     return DoCftAnalysis(dbg.ctx, sub, arg, extra);
 }
 
-__declspec(dllexport) HRESULT CALLBACK ctf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args) {
-    return cft(Client, Args);
-}
