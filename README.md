@@ -2,7 +2,7 @@
 
 **StructScan** is a high-performance extension plugin for the WinDbg debugger (`dbgeng.dll`), designed for **automated reconstruction of undocumented data structures** (such as opaque kernel structures lacking private PDB symbols, custom driver objects, `ntdsai!gAnchor`, `nt!_OBJECT_TYPE`, etc.) and instant synthesis of ready-to-use C/C++ header definitions.
 
-Version **v4.0** features high-speed virtual memory analysis (`ReadVirtual`), automated C/C++ header synthesis (`emit`), Shannon entropy profiling (`entropy`), Bayesian field classification, multi-instance cross-referencing via `LIST_ENTRY` chains (`list`), advanced kernel-level Use-After-Free lifetime analysis (`!uaf`), and cross-architecture Control Flow Transfer (CFT) tracing (`!cft`).
+Version **v4.0** features high-speed virtual memory analysis (`ReadVirtual`), automated C/C++ header synthesis (`emit`), Shannon entropy profiling (`entropy`), Bayesian field classification, multi-instance cross-referencing via `LIST_ENTRY` chains (`list`), advanced kernel-level Use-After-Free lifetime analysis (`!uaf`), and cross-architecture Control Flow tracing and PE transition mapping (`!flow`).
 
 ---
 
@@ -40,7 +40,7 @@ Computes and renders Shannon entropy across 16-byte blocks to pinpoint pointers,
 0: kd> !structscan entropy nt!PsInitialSystemProcess 0x200
 ```
 
-#### 🔹 Mode 5: Control Flow Transfer (CFT) Engine (`!cft`)
+#### 🔹 Mode 5: Control Flow Engine (`!flow`)
 Comprehensive execution-flow tracer, PE structure analyzer, and branch correlator for Windows kernel and user-mode targets across **ARM64 (AArch64)** and **x64 (AMD64)** architectures.
 
 **Control-Flow Transfer Categories:**
@@ -54,28 +54,28 @@ Comprehensive execution-flow tracer, PE structure analyzer, and branch correlato
 
 **Subcommands:**
 ```text
-0: kd> !cft pe [module|addr]          <- PE header, sections, CFG & entry point analyzer
-0: kd> !cft map [module|addr] [max]   <- Control-flow graph potential edges discovery
-0: kd> !cft edge <src> <dst>          <- Inspect a specific control transfer transition
-0: kd> !cft trace [sym|addr] [count]  <- ARM / x64 dynamic branch transfer tracer
-0: kd> !cft snap                      <- Live snapshot: PC/RIP + regs + disasm + stack + entropy
-0: kd> !cft watch <sym|addr>          <- Hardware exec BP + prologue scan + entropy
-0: kd> !cft                           <- Automated 6-phase structural analysis
+0: kd> !flow pe [module|addr]          <- PE header, sections, CFG & entry point analyzer
+0: kd> !flow map [module|addr] [max]   <- Control-flow graph potential edges discovery
+0: kd> !flow edge <src> <dst>          <- Inspect a specific control transfer transition
+0: kd> !flow trace [sym|addr] [count]  <- ARM / x64 dynamic branch transfer tracer
+0: kd> !flow snap                      <- Live snapshot: PC/RIP + regs + disasm + stack + entropy
+0: kd> !flow watch <sym|addr>          <- Hardware exec BP + prologue scan + entropy
+0: kd> !flow                           <- Automated 6-phase structural analysis
 ```
 
 ---
 
-##### 1. PE Header & Entry Point Analyzer (`!cft pe`)
+##### 1. PE Header & Entry Point Analyzer (`!flow pe`)
 Parses `IMAGE_DOS_HEADER` (`MZ`) and `IMAGE_NT_HEADERS64` directly from virtual memory:
 - Calculates virtual address: `AddressOfEntryPoint (RVA) -> VA`.
 - **EntryPoint Hook Detector**: Decodes initial instructions at the entrypoint to detect hooks or trampolines (`b`/`br` on ARM64, `jmp` on x64).
 - Security flags: **Control Flow Guard (CFG)**, **High Entropy ASLR**, **NX/DEP**.
 - Memory section map with permissions (`R-X`, `RW-`, `R--`) marking executable regions.
 
-**Sample Output (`!cft pe nt`):**
+**Sample Output (`!flow pe nt`):**
 ```text
 +==============================================================+
-|  PE IMAGE & ENTRY POINT ANALYZER (CFT)                       |
+|  PE IMAGE & ENTRY POINT ANALYZER (!flow pe)                 |
 +==============================================================+
 
   Module Name       : nt
@@ -104,7 +104,7 @@ Parses `IMAGE_DOS_HEADER` (`MZ`) and `IMAGE_NT_HEADERS64` directly from virtual 
 
 ---
 
-##### 2. Control Flow Graph Edge Discovery (`!cft map`)
+##### 2. Control Flow Graph Edge Discovery (`!flow map`)
 Scans executable sections of a target PE image to discover and map all potential control-flow edges:
 - Identifies direct calls, indirect calls, direct jumps, conditional branches, and returns.
 - Categorizes edge scopes:
@@ -112,7 +112,7 @@ Scans executable sections of a target PE image to discover and map all potential
   - `CROSS_MOD`: Inter-modular API transition.
   - `INDIR_DYN`: Runtime-computed destination (requires CFG monitoring).
 
-**Sample Output (`!cft map nt 25`):**
+**Sample Output (`!flow map nt 25`):**
 ```text
 +==============================================================+
 |  CONTROL FLOW GRAPH (CFG) POTENTIAL EDGE MAP                 |
@@ -140,17 +140,17 @@ Scans executable sections of a target PE image to discover and map all potential
 
 ---
 
-##### 3. Transition Context Correlator (`!cft edge`)
+##### 3. Transition Context Correlator (`!flow edge`)
 Performs deep inspection on a specific control-flow edge between `source` and `destination`:
 - Verifies module membership of both endpoints.
 - Verifies 4-byte instruction alignment on ARM64 (`[!] UNALIGNED DEST`).
 - Flags transitions into non-module / dynamic memory (heap/pool execution / shellcode).
 - Disassembles 5 instructions leading to the branch and 5 instructions at the destination (including PAC `pacibsp` verification).
 
-**Sample Output (`!cft edge nt!KiSystemService nt!PsInvokeWin32Callout`):**
+**Sample Output (`!flow edge nt!KiSystemService nt!PsInvokeWin32Callout`):**
 ```text
 +==============================================================+
-|  TRANSITION CONTEXT INSPECTION & CORRELATOR (CFT)            |
+|  TRANSITION CONTEXT INSPECTION & CORRELATOR (!flow edge)     |
 +==============================================================+
 
   Source Address : 0x000000009de361c0 (nt!KiSystemService+0x0)
@@ -173,16 +173,16 @@ fffff801`9e101e84 a9be53f3 stp         x19,x20,[sp,#-0x20]!
 
 ---
 
-##### 4. Dynamic Branch Tracer (`!cft trace`)
+##### 4. Dynamic Branch Tracer (`!flow trace`)
 Analyzes instructions starting at any address or current `PC`/`RIP`:
 - **ARM64 Branch Decoder**: decodes `bl`, `blr`, `blraa`, `b`, `br`, `braa`, `b.cond`, `cbz`, `tbnz`, `ret`, `retaa`, `svc`, `eret`.
 - **Register Inspection**: queries live register values (`xN`, `lr`) for indirect targets and resolves symbols.
 - **Statistical Summary**: counts calls, jumps, conditional branches, returns, and PAC authentications.
 
-**Sample Output (`!cft trace nt!KiSystemService 40`):**
+**Sample Output (`!flow trace nt!KiSystemService 40`):**
 ```text
 +==============================================================+
-|  ARM / x64 CONTROL FLOW TRANSFER TRACER (CFT)                |
+|  ARM / x64 CONTROL FLOW TRACER (!flow trace)                 |
 +==============================================================+
 
   Target       : nt!KiSystemService (0x000000009de361c0)
@@ -222,19 +222,19 @@ To trap and analyze when a new PE image (driver or DLL) is mapped into memory:
    ```
 2. **Capture loader state on break**:
    ```text
-   0: kd> !cft snap
+   0: kd> !flow snap
    ```
 3. **Analyze the newly mapped PE structure**:
    ```text
-   0: kd> !cft pe mydriver
+   0: kd> !flow pe mydriver
    ```
 4. **Map potential control-flow edges**:
    ```text
-   0: kd> !cft map mydriver 64
+   0: kd> !flow map mydriver 64
    ```
 5. **Set execution watchpoint on the EntryPoint**:
    ```text
-   0: kd> !cft watch <EntryPoint_VA>
+   0: kd> !flow watch <EntryPoint_VA>
    0: kd> g
    ```
 
@@ -397,7 +397,7 @@ structscan/
 │   ├── HeaderSynthesizer.cpp # C/C++ header code synthesizer
 │   ├── EntropyEngine.cpp     # Shannon entropy heatmap engine
 │   ├── UafEngine.cpp         # 5-phase Use-After-Free lifetime analysis engine
-│   └── CftEngine.cpp         # Control Flow Transfer (CFT) tracing engine
+│   └── FlowEngine.cpp        # Control Flow Engine & Tracer
 ├── bin/
 │   ├── structscan_arm64.dll  # Native ARM64 (AArch64) Windows binary
 │   └── structscan_x64.dll    # Native x64 (AMD64) Windows binary

@@ -31,7 +31,7 @@ extern "C" {
 __declspec(dllexport) HRESULT CALLBACK DebugExtensionInitialize(_Out_ PULONG Version, _Out_ PULONG Flags);
 __declspec(dllexport) void CALLBACK DebugExtensionUninitialize(void);
 __declspec(dllexport) HRESULT CALLBACK structscan(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
-__declspec(dllexport) HRESULT CALLBACK cft(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
+__declspec(dllexport) HRESULT CALLBACK flow(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 __declspec(dllexport) HRESULT CALLBACK uaf(_In_ IDebugClient* Client, _In_opt_ PCSTR Args);
 
 #ifdef __cplusplus
@@ -396,7 +396,7 @@ HRESULT DoUafAnalysis(
     const UafScanParams& params
 );
 
-HRESULT DoCftAnalysis(
+HRESULT DoFlowAnalysis(
     const DebugContext& ctx,
     const wchar_t*      subcommand,  // nullptr or L"" = run all phases
     const wchar_t*      arg,         // target sym/addr or subcommand argument

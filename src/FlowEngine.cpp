@@ -1,20 +1,20 @@
 /**
- * @file CftEngine.cpp
- * @brief !cft — Control Flow Transfer (CFT) Auto-Analyzer & Branch Tracer
+ * @file FlowEngine.cpp
+ * @brief !flow — Control Flow Tracer & PE Transition Analyzer
  *
  * Subcommands:
- *   !cft                       — all structural phases + live snapshot
- *   !cft pe [module|addr]      — PE header, sections, CFG & entry point analyzer
- *   !cft map [module|addr] [N] — Control Flow Graph (CFG) potential transfer map
- *   !cft edge <src> <dst>      — Deep inspection of a specific control transfer edge
- *   !cft trace [sym|addr] [N]  — ARM64 / x64 dynamic branch tracer
- *   !cft snap                  — live snapshot: PC/RIP + disasm + regs + stack + entropy
- *   !cft watch <sym|addr>      — Bayesian scan target + set hardware exec BP
- *   !cft trap                  — Phase 1: KTRAP_FRAME / KTHREAD C/C++ header
- *   !cft syscall               — Phase 2: Syscall entry (KiSystemService / KiSystemCall64) entropy map
- *   !cft threads               — Phase 3: KTHREAD cross-ref (scheduler state)
- *   !cft cfg                   — Phase 4: CFG bitmap scan + entropy
- *   !cft ldr                   — Phase 5: LDR module list cross-ref
+ *   !flow                       — all structural phases + live snapshot
+ *   !flow pe [module|addr]      — PE header, sections, CFG & entry point analyzer
+ *   !flow map [module|addr] [N] — Control Flow Graph (CFG) potential transfer map
+ *   !flow edge <src> <dst>      — Deep inspection of a specific control transfer edge
+ *   !flow trace [sym|addr] [N]  — ARM64 / x64 dynamic branch tracer
+ *   !flow snap                  — live snapshot: PC/RIP + disasm + regs + stack + entropy
+ *   !flow watch <sym|addr>      — Bayesian scan target + set hardware exec BP
+ *   !flow trap                  — Phase 1: KTRAP_FRAME / KTHREAD C/C++ header
+ *   !flow syscall               — Phase 2: Syscall entry (KiSystemService / KiSystemCall64) entropy map
+ *   !flow threads               — Phase 3: KTHREAD cross-ref (scheduler state)
+ *   !flow cfg                   — Phase 4: CFG bitmap scan + entropy
+ *   !flow ldr                   — Phase 5: LDR module list cross-ref
  */
 
 #include "../include/structscan.h"
@@ -177,7 +177,7 @@ static HRESULT RunPhasePe(const DebugContext& ctx, const wchar_t* arg) {
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"+==============================================================+\n"
-        L"|  PE IMAGE & ENTRY POINT ANALYZER (CFT)                       |\n"
+        L"|  PE IMAGE & ENTRY POINT ANALYZER (!flow pe)                 |\n"
         L"+==============================================================+\n");
 
     ULONG64 baseAddr = 0;
@@ -199,9 +199,9 @@ static HRESULT RunPhasePe(const DebugContext& ctx, const wchar_t* arg) {
     if (baseAddr == 0) {
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"[-] Cannot resolve target module base.\n"
-            L"    Usage: !cft pe [module|addr]\n"
-            L"    Example: !cft pe ntoskrnl\n"
-            L"    Example: !cft pe 0xfffff8019d800000\n");
+            L"    Usage: !flow pe [module|addr]\n"
+            L"    Example: !flow pe ntoskrnl\n"
+            L"    Example: !flow pe 0xfffff8019d800000\n");
         return E_INVALIDARG;
     }
 
@@ -513,8 +513,8 @@ static HRESULT RunPhaseMap(const DebugContext& ctx, const wchar_t* arg, const wc
     if (baseAddr == 0) {
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
             L"[-] Cannot resolve target module base.\n"
-            L"    Usage: !cft map [module|addr] [max_edges]\n"
-            L"    Example: !cft map ntoskrnl 64\n");
+            L"    Usage: !flow map [module|addr] [max_edges]\n"
+            L"    Example: !flow map ntoskrnl 64\n");
         return E_INVALIDARG;
     }
 
@@ -643,13 +643,13 @@ static HRESULT RunPhaseEdge(const DebugContext& ctx, const wchar_t* srcArg, cons
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"+==============================================================+\n"
-        L"|  TRANSITION CONTEXT INSPECTION & CORRELATOR (CFT)            |\n"
+        L"|  TRANSITION CONTEXT INSPECTION & CORRELATOR (!flow edge)     |\n"
         L"+==============================================================+\n");
 
     if (!srcArg || !dstArg || wcslen(srcArg) == 0 || wcslen(dstArg) == 0) {
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"[-] Usage: !cft edge <source_addr> <target_addr>\n"
-            L"    Example: !cft edge nt!KiSystemService 0xfffff8019e101e80\n");
+            L"[-] Usage: !flow edge <source_addr> <target_addr>\n"
+            L"    Example: !flow edge nt!KiSystemService 0xfffff8019e101e80\n");
         return E_INVALIDARG;
     }
 
@@ -724,14 +724,14 @@ static HRESULT RunPhaseEdge(const DebugContext& ctx, const wchar_t* srcArg, cons
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TRACE — ARM / x64 Control Flow Transfer (CFT) Tracer
+// TRACE — ARM / x64 Control Flow Tracer (!flow trace)
 // ─────────────────────────────────────────────────────────────────────────────
 
 static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const wchar_t* extraArg) {
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"+==============================================================+\n"
-        L"|  ARM / x64 CONTROL FLOW TRANSFER TRACER (CFT)                |\n"
+        L"|  ARM / x64 CONTROL FLOW TRACER (!flow trace)                 |\n"
         L"+==============================================================+\n");
 
     // ── 1. Determine target address ──────────────────────────────────────────
@@ -759,8 +759,8 @@ static HRESULT RunPhaseTrace(const DebugContext& ctx, const wchar_t* arg, const 
         } else {
             ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
                 L"[-] No target specified and cannot read live IP.\n"
-                L"    Usage: !cft trace <sym|addr> [count]\n"
-                L"    Example: !cft trace nt!KiSystemService 32\n");
+                L"    Usage: !flow trace <sym|addr> [count]\n"
+                L"    Example: !flow trace nt!KiSystemService 32\n");
             return E_INVALIDARG;
         }
     }
@@ -1109,10 +1109,10 @@ static HRESULT RunPhaseWatch(const DebugContext& ctx, const wchar_t* arg) {
 
     if (!arg || wcslen(arg) == 0) {
         ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
-            L"\n[-] Usage: !cft watch <sym|addr>\n"
-            L"    Example: !cft watch nt!KiSystemService\n"
-            L"    Example: !cft watch nt!KiSystemCall64\n"
-            L"    Example: !cft watch 0xfffff8019da013b0\n");
+            L"\n[-] Usage: !flow watch <sym|addr>\n"
+            L"    Example: !flow watch nt!KiSystemService\n"
+            L"    Example: !flow watch nt!KiSystemCall64\n"
+            L"    Example: !flow watch 0xfffff8019da013b0\n");
         return E_INVALIDARG;
     }
 
@@ -1299,14 +1299,14 @@ static HRESULT RunPhaseLdr(const DebugContext& ctx, const wchar_t* /*arg*/) {
 // Phase dispatch table
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct CftPhaseEntry {
+struct FlowPhaseEntry {
     const wchar_t* keyword;
     const wchar_t* label;
     HRESULT (*fn)(const DebugContext&, const wchar_t* arg);
     bool runInAllMode;
 };
 
-static const CftPhaseEntry kCftPhases[] = {
+static const FlowPhaseEntry kFlowPhases[] = {
     // keyword      label                     fn                  runInAllMode
     { L"snap",    L"Live IP snapshot",       RunPhaseSnap,     true  },
     { L"trap",    L"KTRAP_FRAME",            RunPhaseTrapFrame, true  },
@@ -1321,13 +1321,13 @@ static const CftPhaseEntry kCftPhases[] = {
 // Public entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
-                      const wchar_t* arg, const wchar_t* extraArg) {
+HRESULT DoFlowAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
+                       const wchar_t* arg, const wchar_t* extraArg) {
     const bool runAll = (subcommand == nullptr || wcslen(subcommand) == 0);
 
     // Direct subcommands
     if (subcommand) {
-        if (_wcsicmp(subcommand, L"trace") == 0) {
+        if (_wcsicmp(subcommand, L"trace") == 0 || _wcsicmp(subcommand, L"cft") == 0) {
             return RunPhaseTrace(ctx, arg, extraArg);
         }
         if (_wcsicmp(subcommand, L"pe") == 0) {
@@ -1344,7 +1344,7 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"================================================================\n"
-        L"  StructScan !cft v4.0  --  Control Flow Transfer Tracer\n"
+        L"  StructScan !flow v4.0  --  Control Flow Engine\n"
         L"================================================================\n"
         L"\n"
         L"  PE Map     : pe [module|addr]         (PE header, sections, CFG & entry point)\n"
@@ -1357,7 +1357,7 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
         L"  (no args   : run all 6 phases except watch, trace, pe, map, edge)\n");
 
     if (!runAll) {
-        for (const auto& phase : kCftPhases) {
+        for (const auto& phase : kFlowPhases) {
             if (_wcsicmp(subcommand, phase.keyword) == 0) {
                 return phase.fn(ctx, arg);
             }
@@ -1372,7 +1372,7 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
     HRESULT worst = S_OK;
     int completed = 0, skipped = 0;
 
-    for (const auto& phase : kCftPhases) {
+    for (const auto& phase : kFlowPhases) {
         if (!phase.runInAllMode) continue;
         if (ctx.ctrl->GetInterrupt() == S_OK) {
             ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS, L"\n[*] Aborted (Ctrl+C)\n");
@@ -1385,7 +1385,7 @@ HRESULT DoCftAnalysis(const DebugContext& ctx, const wchar_t* subcommand,
     ctx.ctrl->OutputWide(DEBUG_OUTCTL_ALL_CLIENTS,
         L"\n"
         L"================================================================\n"
-        L"  !cft complete -- %d phases done, %d skipped/failed\n"
+        L"  !flow complete -- %d phases done, %d skipped/failed\n"
         L"================================================================\n\n",
         completed, skipped);
 
